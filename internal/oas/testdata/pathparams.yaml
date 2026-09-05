@@ -1,0 +1,28 @@
+openapi: 3.1.0
+info: { title: Path Params, version: 1.0.0 }
+paths:
+  /things/{id}:
+    parameters:
+      - name: tenant
+        in: header
+        required: true
+        schema: { type: string }
+      - name: id
+        in: path
+        required: true
+        description: path-level
+        schema: { type: string }
+    get:
+      operationId: getThing
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: operation-level override
+          schema: { type: string, format: uuid }
+      responses:
+        '200': { description: ok }
+    delete:
+      operationId: deleteThing
+      responses:
+        '204': { description: gone }

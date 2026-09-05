@@ -1,0 +1,61 @@
+openapi: 3.1.0
+info:
+  title: Orders Service
+  version: 2.1.0
+paths:
+  /orders:
+    get:
+      operationId: listOrders
+      responses:
+        '200':
+          description: Orders
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Order' }
+    post:
+      operationId: createOrder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NewOrder' }
+      responses:
+        '201':
+          description: Created
+        '400':
+          description: Bad request
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+components:
+  schemas:
+    Order:
+      type: object
+      required: [id, total]
+      properties:
+        id: { type: string }
+        total: { type: number, minimum: 0 }
+        lines:
+          type: array
+          items: { $ref: '#/components/schemas/OrderLine' }
+    OrderLine:
+      type: object
+      properties:
+        sku: { type: string }
+        qty: { type: integer, minimum: 1 }
+    NewOrder:
+      type: object
+      required: [lines]
+      properties:
+        lines:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/OrderLine' }
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: integer }
+        message: { type: string }

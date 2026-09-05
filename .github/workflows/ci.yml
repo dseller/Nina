@@ -1,0 +1,53 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          check-latest: true
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"; echo "$unformatted"; exit 1
+          fi
+      - name: vet
+        run: go vet ./...
+      # Linux has the C toolchain the race detector needs, which the Windows
+      # dev box does not; this is the job that actually exercises reload
+      # concurrency.
+      - name: test (race)
+        run: go test -race ./...
+      - name: build
+        run: go build ./...
+      - name: validate the example config
+        run: |
+          go build -o bin/nina ./cmd/nina
+          ./bin/nina check -c examples/nina.yaml
+          ./bin/nina spec build -c examples/nina.yaml -o /dev/null
+
+  cross-build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { goos: linux,   goarch: amd64 }
+          - { goos: linux,   goarch: arm64 }
+          - { goos: darwin,  goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          check-latest: true
+      - run: GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build ./cmd/nina

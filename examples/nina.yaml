@@ -1,0 +1,92 @@
+# Nina example: two independent services consolidated behind one host and one
+# published OpenAPI document.
+#
+#   nina check      -c examples/nina.yaml     validate everything, exit non-zero on error
+#   nina spec build -c examples/nina.yaml     print the merged document
+#   nina run        -c examples/nina.yaml     serve it
+
+version: 1
+
+server:
+  listen: "127.0.0.1:18080"
+  read_header_timeout: 5s
+  idle_timeout: 60s
+  admin:
+    listen: "127.0.0.1:19090"
+    docs: true
+
+spec:
+  title: Acme Public API
+  version: "1.0.0"
+  description: Users and Orders, consolidated by the gateway.
+  servers:
+    - https://api.acme.example
+  # Collapse structurally identical components that share a base name, so the
+  # two services' Error schemas become one.
+  dedupe: true
+
+defaults:
+  timeout: 5s
+  retry:
+    attempts: 2
+    backoff: 50ms
+    jitter: true
+    idempotent_only: true
+  circuit_breaker:
+    failure_ratio: 0.5
+    min_requests: 20
+    open_for: 10s
+
+backends:
+  - name: users
+    spec:
+      file: ./specs/users.yaml
+    hosts:
+      - ${USERS_HOST:-http://127.0.0.1:9001}
+    # The service publishes /v1/users; strip that so the gateway can mount it
+    # wherever it likes without doubling the segment.
+    strip_prefix: /v1
+    forward_headers:
+      X-Gateway: nina
+
+  - name: orders
+    spec:
+      file: ./specs/orders.yaml
+    hosts:
+      - ${ORDERS_HOST:-http://127.0.0.1:9002}
+    timeout: 3s
+
+middleware:
+  strict:
+    type: validate
+    request: enforce
+
+  public-cors:
+    type: cors
+    allow_origins: ["*"]
+    allow_headers: ["Content-Type", "Authorization"]
+    max_age: 10m
+
+  per-ip:
+    type: ratelimit
+    store: memory
+    key: ip
+    limit: 100
+    window: 1m
+
+  trace:
+    type: headers
+    response:
+      set:
+        X-Served-By: nina
+
+expose:
+  - backend: users
+    prefix: /api
+    # Everything except the service's internal endpoints.
+    exclude: ["internal*"]
+    middleware: [public-cors, per-ip, strict, trace]
+
+  - backend: orders
+    prefix: /api
+    middleware: [public-cors, per-ip, strict, trace]

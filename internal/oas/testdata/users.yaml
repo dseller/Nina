@@ -1,0 +1,91 @@
+openapi: 3.0.3
+info:
+  title: Users API
+  version: 1.2.0
+paths:
+  /users:
+    get:
+      operationId: listUsers
+      summary: List users
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100 }
+        - $ref: '#/components/parameters/TraceId'
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/User' }
+        default:
+          $ref: '#/components/responses/ErrorResponse'
+    post:
+      operationId: createUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NewUser' }
+      responses:
+        '201':
+          description: created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+  /users/{id}:
+    get:
+      operationId: getUser
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+  /internal/debug:
+    get:
+      operationId: internalDebug
+      responses:
+        '200': { description: ok }
+components:
+  parameters:
+    TraceId:
+      name: X-Trace-Id
+      in: header
+      schema: { type: string }
+  responses:
+    ErrorResponse:
+      description: error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  schemas:
+    User:
+      type: object
+      required: [id, email]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        profile: { $ref: '#/components/schemas/Profile' }
+    Profile:
+      type: object
+      properties:
+        displayName: { type: string }
+    NewUser:
+      type: object
+      required: [email]
+      properties:
+        email: { type: string, format: email }
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: integer }
+        message: { type: string }
