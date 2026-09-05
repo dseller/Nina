@@ -20,7 +20,7 @@ spec:
   version: "1.0.0"
   description: All Easy BI services using the Nina API gateway
   servers:
-    - https://api.acme.example
+    - http://127.0.0.1:18080
   # Collapse structurally identical components that share a base name, so the
   # two services' Error schemas become one.
   dedupe: true
@@ -42,19 +42,23 @@ backends:
     spec:
       url: https://alcomex.easybi.local:8000/api/v2/schema/
     hosts:
-      - ${USERS_HOST:-http://127.0.0.1:9001}
+      - ${USERS_HOST:-https://127.0.0.1:8000}
     # The service publishes /v1/users; strip that so the gateway can mount it
     # wherever it likes without doubling the segment.
-    strip_prefix: /v1
+    tls:
+        insecure_skip_verify: true
+    strip_prefix: /api/v2
     forward_headers:
       X-Gateway: nina
 
-  - name: orders
+  - name: emerald
     spec:
-      file: ./specs/orders.yaml
+      url: http://127.0.0.1:8080/openapi.json
     hosts:
       - ${ORDERS_HOST:-http://127.0.0.1:9002}
     timeout: 3s
+    tls:
+        insecure_skip_verify: true
     # For an internal service behind a self-signed certificate. This turns off
     # certificate and hostname checks for every connection to this backend,
     # including the fetch of its OpenAPI document: the connection stays
@@ -94,6 +98,6 @@ expose:
     exclude: ["internal*"]
     middleware: [public-cors, per-ip, strict, trace]
 
-  - backend: orders
-    prefix: /api
+  - backend: emerald
+    prefix: /api/emerald
     middleware: [public-cors, per-ip, strict, trace]

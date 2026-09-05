@@ -2,3 +2,4 @@
 /dist/
 *.exe
 .spec-cache/
+easybi.yaml

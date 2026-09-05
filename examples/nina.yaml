@@ -38,9 +38,9 @@ defaults:
     open_for: 10s
 
 backends:
-  - name: portal
+  - name: users
     spec:
-      url: https://alcomex.easybi.local:8000/api/v2/schema/
+      file: ./specs/users.yaml
     hosts:
       - ${USERS_HOST:-http://127.0.0.1:9001}
     # The service publishes /v1/users; strip that so the gateway can mount it
@@ -88,8 +88,8 @@ middleware:
         X-Served-By: nina
 
 expose:
-  - backend: portal
-    prefix: /api/core
+  - backend: users
+    prefix: /v1
     # Everything except the service's internal endpoints.
     exclude: ["internal*"]
     middleware: [public-cors, per-ip, strict, trace]
