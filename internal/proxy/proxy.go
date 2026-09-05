@@ -5,6 +5,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -44,6 +45,9 @@ type Options struct {
 	// MaxRetryBody bounds how much of a request body will be buffered so a retry
 	// can replay it. Larger bodies simply are not retried.
 	MaxRetryBody int64
+	// InsecureSkipVerify disables upstream certificate verification. See
+	// config.TLSConfig for what that gives up.
+	InsecureSkipVerify bool
 	// Transport overrides the default; used by tests.
 	Transport http.RoundTripper
 }
@@ -60,6 +64,7 @@ type Backend struct {
 	retry          RetryPolicy
 	forwardHeaders map[string]string
 	maxRetryBody   int64
+	insecureTLS    bool
 }
 
 // NewBackend builds a backend with its own connection pool. Each backend gets a
@@ -86,6 +91,7 @@ func NewBackend(o Options) (*Backend, error) {
 		retry:          o.Retry,
 		forwardHeaders: o.ForwardHeaders,
 		maxRetryBody:   o.MaxRetryBody,
+		insecureTLS:    o.InsecureSkipVerify,
 	}
 	if b.maxRetryBody == 0 {
 		b.maxRetryBody = 1 << 20
@@ -106,7 +112,12 @@ func NewBackend(o Options) (*Backend, error) {
 			IdleConnTimeout:       90 * time.Second,
 			TLSHandshakeTimeout:   5 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
-			ForceAttemptHTTP2:     true,
+			// Setting TLSClientConfig below suppresses the transport's automatic
+			// HTTP/2 upgrade unless this is explicitly on.
+			ForceAttemptHTTP2: true,
+		}
+		if o.InsecureSkipVerify {
+			t.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} // #nosec G402 -- opt-in, see config.TLSConfig
 		}
 		b.transport = t
 		b.closeTransport = t.CloseIdleConnections
@@ -116,6 +127,10 @@ func NewBackend(o Options) (*Backend, error) {
 
 func (b *Backend) Pool() *Pool       { return b.pool }
 func (b *Backend) Breaker() *Breaker { return b.breaker }
+
+// InsecureTLS reports whether upstream certificate verification is disabled for
+// this backend, so operators can audit it from the admin surface.
+func (b *Backend) InsecureTLS() bool { return b.insecureTLS }
 
 // Close releases idle connections. In-flight requests are unaffected; the caller
 // is expected to have drained them first.

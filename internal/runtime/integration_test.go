@@ -131,6 +131,21 @@ func testRegistry() *chain.Registry {
 
 func buildGateway(t *testing.T, cfgYAML string) (*runtime.Server, func()) {
 	t.Helper()
+	srv, err := tryBuildGateway(t, cfgYAML)
+	if err != nil {
+		t.Fatalf("build gateway: %v", err)
+	}
+	return srv, func() {
+		if rt := srv.Current(); rt != nil {
+			rt.Retire(0)
+		}
+	}
+}
+
+// tryBuildGateway returns the build error instead of failing, for tests that
+// assert a configuration is rejected.
+func tryBuildGateway(t *testing.T, cfgYAML string) (*runtime.Server, error) {
+	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "nina.yaml")
 	if err := os.WriteFile(path, []byte(cfgYAML), 0o644); err != nil {
@@ -147,17 +162,9 @@ func buildGateway(t *testing.T, cfgYAML string) (*runtime.Server, func()) {
 		Fetcher:  specsrc.New(filepath.Join(dir, "cache")),
 		Registry: testRegistry(),
 	}
-	srv, err := runtime.NewServer(context.Background(), cfg, deps, runtime.ServerOptions{
+	return runtime.NewServer(context.Background(), cfg, deps, runtime.ServerOptions{
 		ConfigPath: path, DrainGrace: time.Second,
 	})
-	if err != nil {
-		t.Fatalf("build gateway: %v", err)
-	}
-	return srv, func() {
-		if rt := srv.Current(); rt != nil {
-			rt.Retire(0)
-		}
-	}
 }
 
 func twoBackendConfig(users, orders *upstream) string {

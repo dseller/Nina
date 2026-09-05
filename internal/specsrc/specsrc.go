@@ -6,6 +6,7 @@ package specsrc
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -24,6 +25,9 @@ type Source struct {
 	URL     string // http(s) URL, or empty
 	// OnError is "fail" or "stale".
 	OnError string
+	// InsecureSkipVerify disables TLS certificate verification when fetching
+	// this document, matching the backend's own setting.
+	InsecureSkipVerify bool
 }
 
 func (s Source) String() string {
@@ -53,6 +57,35 @@ type Fetcher struct {
 
 	mu    sync.Mutex
 	conds map[string]condition // keyed by URL
+
+	// insecure is built on first use by a source that opted out of certificate
+	// verification. It is separate from Client so that one lax backend cannot
+	// weaken fetches for every other one.
+	insecureOnce sync.Once
+	insecure     *http.Client
+}
+
+// clientFor picks the HTTP client a source should be fetched with.
+//
+// Note that skipping verification applies to the whole redirect chain, so a
+// spec URL that redirects elsewhere is fetched without verification too. That
+// is inherent to the setting rather than specific to this implementation.
+func (f *Fetcher) clientFor(src Source) *http.Client {
+	if !src.InsecureSkipVerify {
+		return f.Client
+	}
+	f.insecureOnce.Do(func() {
+		f.insecure = &http.Client{
+			Timeout:       f.Client.Timeout,
+			CheckRedirect: f.Client.CheckRedirect,
+			Transport: &http.Transport{
+				Proxy:               http.ProxyFromEnvironment,
+				TLSHandshakeTimeout: 10 * time.Second,
+				TLSClientConfig:     &tls.Config{InsecureSkipVerify: true}, // #nosec G402 -- opt-in, see config.TLSConfig
+			},
+		}
+	})
+	return f.insecure
 }
 
 type condition struct {
@@ -124,7 +157,7 @@ func (f *Fetcher) fetchURL(ctx context.Context, src Source) (*Result, error) {
 		req.Header.Set("If-Modified-Since", c.lastModified)
 	}
 
-	resp, err := f.Client.Do(req)
+	resp, err := f.clientFor(src).Do(req)
 	if err != nil {
 		return nil, err
 	}

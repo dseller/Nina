@@ -175,3 +175,71 @@ func BenchmarkMatch(b *testing.B) {
 		}
 	}
 }
+
+// Nested-resource generators (DRF routers, among others) routinely emit
+// /enums/{id}/ alongside /enums/{enum_pk}/values/. Those are different paths, so
+// both are legal OpenAPI and both must register and match, each seeing its own
+// parameter name.
+func TestDifferentParamNamesAtTheSamePosition(t *testing.T) {
+	r := New[string]()
+	mustAdd(t, r, "GET", "/enums/{id}/")
+	mustAdd(t, r, "DELETE", "/enums/{id}/")
+	mustAdd(t, r, "GET", "/enums/{enum_pk}/values/")
+	mustAdd(t, r, "POST", "/enums/{enum_pk}/values/")
+	mustAdd(t, r, "GET", "/enums/{enum_pk}/values/{value_id}/")
+
+	got := r.Match("GET", "/enums/42/")
+	if !got.Found || got.Payload != "GET /enums/{id}/" {
+		t.Fatalf("terminal route: %+v", got)
+	}
+	if v, ok := got.Params.Get("id"); !ok || v != "42" {
+		t.Errorf("id = %q (ok=%v), want 42", v, ok)
+	}
+	if _, ok := got.Params.Get("enum_pk"); ok {
+		t.Error("the sibling template's parameter name leaked into this match")
+	}
+
+	got = r.Match("GET", "/enums/42/values/")
+	if !got.Found || got.Payload != "GET /enums/{enum_pk}/values/" {
+		t.Fatalf("nested route: %+v", got)
+	}
+	if v, ok := got.Params.Get("enum_pk"); !ok || v != "42" {
+		t.Errorf("enum_pk = %q (ok=%v), want 42", v, ok)
+	}
+
+	got = r.Match("GET", "/enums/42/values/7/")
+	if !got.Found {
+		t.Fatalf("deep nested route: %+v", got)
+	}
+	pk, _ := got.Params.Get("enum_pk")
+	vid, _ := got.Params.Get("value_id")
+	if pk != "42" || vid != "7" {
+		t.Errorf("params = %v, want enum_pk=42 value_id=7", got.Params)
+	}
+}
+
+// Two spellings of the same shape for one method are still a genuine duplicate.
+func TestSameShapeDifferentSpellingStillConflicts(t *testing.T) {
+	r := New[string]()
+	mustAdd(t, r, "GET", "/users/{id}")
+	if err := r.Add("GET", "/users/{userId}", "x"); err == nil {
+		t.Fatal("two spellings of the same shape should still conflict")
+	}
+	// A different method at the same position may spell it differently, and each
+	// must see its own name.
+	if err := r.Add("POST", "/users/{userId}", "POST /users/{userId}"); err != nil {
+		t.Fatalf("a different method should be allowed to spell it differently: %v", err)
+	}
+	if got := r.Match("GET", "/users/9"); got.Found {
+		if v, _ := got.Params.Get("id"); v != "9" {
+			t.Errorf("GET param id = %q", v)
+		}
+	}
+	got := r.Match("POST", "/users/9")
+	if !got.Found {
+		t.Fatal("POST did not match")
+	}
+	if v, _ := got.Params.Get("userId"); v != "9" {
+		t.Errorf("POST param userId = %q, want 9", v)
+	}
+}

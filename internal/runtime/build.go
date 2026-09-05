@@ -132,11 +132,20 @@ func Build(ctx context.Context, cfg *config.Config, deps Deps, generation uint64
 	var degraded []string
 	for i := range cfg.Backends {
 		b := &cfg.Backends[i]
+		if b.InsecureTLS() && b.UsesTLS() {
+			// Loud, and on every build rather than only the first: an operator
+			// scanning logs after an incident should not have to scroll back to
+			// the original start-up to discover this was on.
+			log.Warn("upstream TLS certificate verification is DISABLED for this backend; "+
+				"the connection is encrypted but not authenticated, so an interposed attacker would go undetected",
+				"backend", b.Name)
+		}
 		src := specsrc.Source{
-			Backend: b.Name,
-			File:    cfg.ResolvePath(b.Spec.File),
-			URL:     b.Spec.URL,
-			OnError: b.Spec.OnError,
+			Backend:            b.Name,
+			File:               cfg.ResolvePath(b.Spec.File),
+			URL:                b.Spec.URL,
+			OnError:            b.Spec.OnError,
+			InsecureSkipVerify: b.InsecureTLS(),
 		}
 		res, ferr := deps.Fetcher.Fetch(ctx, src)
 		if ferr != nil {
@@ -183,14 +192,15 @@ func Build(ctx context.Context, cfg *config.Config, deps Deps, generation uint64
 	for i := range cfg.Backends {
 		b := &cfg.Backends[i]
 		backend, berr := proxy.NewBackend(proxy.Options{
-			Name:           b.Name,
-			Hosts:          b.Hosts,
-			LoadBalance:    b.LoadBalance,
-			Timeout:        b.Timeout.Or(cfg.Defaults.Timeout.Std()),
-			Retry:          retryPolicy(b.Retry, cfg.Defaults.Retry),
-			Breaker:        breakerConfig(b.CircuitBreaker, cfg.Defaults.CircuitBreaker, b.Name, deps.Metrics),
-			ForwardHeaders: b.ForwardHeaders,
-			MaxRetryBody:   cfg.Server.MaxRequestBody,
+			Name:               b.Name,
+			Hosts:              b.Hosts,
+			LoadBalance:        b.LoadBalance,
+			Timeout:            b.Timeout.Or(cfg.Defaults.Timeout.Std()),
+			Retry:              retryPolicy(b.Retry, cfg.Defaults.Retry),
+			Breaker:            breakerConfig(b.CircuitBreaker, cfg.Defaults.CircuitBreaker, b.Name, deps.Metrics),
+			ForwardHeaders:     b.ForwardHeaders,
+			MaxRetryBody:       cfg.Server.MaxRequestBody,
+			InsecureSkipVerify: b.InsecureTLS(),
 		})
 		if berr != nil {
 			return nil, berr

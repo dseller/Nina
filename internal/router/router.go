@@ -44,13 +44,26 @@ type Router[T any] struct {
 type node[T any] struct {
 	// static children by literal segment.
 	static map[string]*node[T]
-	// param is the single wildcard child. OpenAPI does not allow two different
-	// parameter names to occupy the same position, so one child suffices.
-	param     *node[T]
-	paramName string
+	// param is the single wildcard child. Matching is name-agnostic: a
+	// parameter segment matches anything, so one child is enough regardless of
+	// what the various templates call it.
+	param *node[T]
 	// handlers by upper-case HTTP method, set on terminal nodes.
-	handlers map[string]T
+	handlers map[string]routeEntry[T]
 	methods  []string // sorted, for the Allow header
+}
+
+// routeEntry pairs a payload with the parameter names of the template it was
+// registered under.
+//
+// Names live here rather than on the node because two templates can share a
+// position and disagree on the name: /enums/{id}/ and /enums/{enum_pk}/values/
+// are different paths, and nested-resource generators emit that pattern
+// constantly. Only the values are positional; the names come from whichever
+// route actually matched.
+type routeEntry[T any] struct {
+	payload    T
+	paramNames []string
 }
 
 func newNode[T any]() *node[T] {
@@ -79,20 +92,13 @@ func (r *Router[T]) Add(method, template string, payload T) error {
 	segs := splitPath(template)
 
 	cur := r.root
+	var paramNames []string
 	for _, seg := range segs {
 		if name, ok := paramName(seg); ok {
 			if cur.param == nil {
 				cur.param = newNode[T]()
-				cur.paramName = name
-			} else if cur.paramName != name {
-				// Two templates disagree on what to call the same position. The
-				// router could cope, but the published document could not: the
-				// parameter would need two names in one path item.
-				return &ConflictError{
-					Method: method, Path: template,
-					Existing: "parameter at this position is already named {" + cur.paramName + "}",
-				}
 			}
+			paramNames = append(paramNames, name)
 			cur = cur.param
 			continue
 		}
@@ -105,12 +111,14 @@ func (r *Router[T]) Add(method, template string, payload T) error {
 	}
 
 	if cur.handlers == nil {
-		cur.handlers = map[string]T{}
+		cur.handlers = map[string]routeEntry[T]{}
 	}
+	// A genuine duplicate is two templates of the same shape for one method,
+	// which normalise() detects regardless of how the parameters are spelled.
 	if _, dup := cur.handlers[method]; dup {
 		return &ConflictError{Method: method, Path: template, Existing: r.templates[method+" "+normalise(template)]}
 	}
-	cur.handlers[method] = payload
+	cur.handlers[method] = routeEntry[T]{payload: payload, paramNames: paramNames}
 	cur.methods = append(cur.methods, method)
 	sort.Strings(cur.methods)
 	r.templates[method+" "+normalise(template)] = method + " " + template
@@ -136,32 +144,38 @@ type Result[T any] struct {
 func (r *Router[T]) Match(method, escapedPath string) Result[T] {
 	var res Result[T]
 	segs := splitPath(escapedPath)
-	params := make(Params, 0, 4)
+	values := make([]string, 0, 4)
 
-	n, params, ok := r.walk(r.root, segs, params)
+	n, values, ok := r.walk(r.root, segs, values)
 	if !ok || n.handlers == nil {
 		return res
 	}
 	res.PathMatched = true
 	res.Allow = n.methods
 	method = strings.ToUpper(method)
-	payload, ok := n.handlers[method]
+	entry, ok := n.handlers[method]
 	if !ok {
 		// HEAD falls back to GET, which is what every HTTP client expects.
 		if method == "HEAD" {
-			if payload, ok = n.handlers["GET"]; !ok {
+			if entry, ok = n.handlers["GET"]; !ok {
 				return res
 			}
 		} else {
 			return res
 		}
 	}
-	for i := range params {
-		if v, err := url.PathUnescape(params[i].Value); err == nil {
-			params[i].Value = v
+	// Zip the positional values with the names of the route that matched.
+	params := make(Params, 0, len(values))
+	for i, v := range values {
+		if i >= len(entry.paramNames) {
+			break
 		}
+		if dec, err := url.PathUnescape(v); err == nil {
+			v = dec
+		}
+		params = append(params, Param{Name: entry.paramNames[i], Value: v})
 	}
-	res.Payload = payload
+	res.Payload = entry.payload
 	res.Params = params
 	res.Found = true
 	return res
@@ -170,26 +184,25 @@ func (r *Router[T]) Match(method, escapedPath string) Result[T] {
 // walk descends the tree, preferring a static child and backtracking to the
 // parameter child only when the static branch dead-ends. Without the backtrack,
 // /users/me would shadow /users/{id} for every path below it.
-func (r *Router[T]) walk(n *node[T], segs []string, params Params) (*node[T], Params, bool) {
+func (r *Router[T]) walk(n *node[T], segs []string, values []string) (*node[T], []string, bool) {
 	if len(segs) == 0 {
 		if n.handlers == nil {
-			return nil, params, false
+			return nil, values, false
 		}
-		return n, params, true
+		return n, values, true
 	}
 	seg := segs[0]
 	if child, ok := n.static[seg]; ok {
-		if got, p, ok := r.walk(child, segs[1:], params); ok {
-			return got, p, true
+		if got, v, ok := r.walk(child, segs[1:], values); ok {
+			return got, v, true
 		}
 	}
 	if n.param != nil && seg != "" {
-		p := append(params, Param{Name: n.paramName, Value: seg})
-		if got, p, ok := r.walk(n.param, segs[1:], p); ok {
-			return got, p, true
+		if got, v, ok := r.walk(n.param, segs[1:], append(values, seg)); ok {
+			return got, v, true
 		}
 	}
-	return nil, params, false
+	return nil, values, false
 }
 
 // splitPath breaks a path into segments, ignoring leading and trailing slashes

@@ -16,9 +16,9 @@ server:
     docs: true
 
 spec:
-  title: Acme Public API
+  title: Easy BI API
   version: "1.0.0"
-  description: Users and Orders, consolidated by the gateway.
+  description: All Easy BI services using the Nina API gateway
   servers:
     - https://api.acme.example
   # Collapse structurally identical components that share a base name, so the

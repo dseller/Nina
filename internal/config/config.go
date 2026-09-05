@@ -94,6 +94,41 @@ type Backend struct {
 	StripPrefix string `json:"strip_prefix"`
 	// ForwardHeaders are added to every upstream request from this backend.
 	ForwardHeaders map[string]string `json:"forward_headers"`
+	// TLS controls how this backend's certificates are verified.
+	TLS *TLSConfig `json:"tls"`
+}
+
+// TLSConfig controls verification of an upstream's TLS certificate.
+type TLSConfig struct {
+	// InsecureSkipVerify disables certificate chain and hostname verification
+	// for every connection to this backend, including the fetch of its OpenAPI
+	// document.
+	//
+	// This removes the gateway's only defence against an attacker interposed on
+	// the connection to the upstream: any certificate is accepted, so the
+	// connection is encrypted but not authenticated. It exists for internal
+	// services presenting self-signed or otherwise unverifiable certificates.
+	// Where the issuing CA can be trusted instead, do that.
+	InsecureSkipVerify bool `json:"insecure_skip_verify"`
+}
+
+// InsecureTLS reports whether certificate verification is disabled.
+func (b *Backend) InsecureTLS() bool {
+	return b.TLS != nil && b.TLS.InsecureSkipVerify
+}
+
+// UsesTLS reports whether any connection to this backend is over https, which
+// is what makes the TLS settings meaningful.
+func (b *Backend) UsesTLS() bool {
+	if strings.HasPrefix(b.Spec.URL, "https://") {
+		return true
+	}
+	for _, h := range b.Hosts {
+		if strings.HasPrefix(h, "https://") {
+			return true
+		}
+	}
+	return false
 }
 
 // SpecSource points at one upstream OpenAPI document.

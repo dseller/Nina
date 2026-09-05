@@ -222,3 +222,71 @@ func TestRetryValidation(t *testing.T) {
 		t.Errorf("expected a guard against absurd retry counts, got %v", err)
 	}
 }
+
+func TestTLSBlockParsing(t *testing.T) {
+	src := strings.Replace(minimal,
+		`    hosts: ["https://users.internal"]`,
+		"    hosts: [\"https://users.internal\"]\n    tls: { insecure_skip_verify: true }", 1)
+	c, err := Parse("test.yaml", []byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Backends[0].InsecureTLS() {
+		t.Error("insecure_skip_verify did not survive parsing")
+	}
+	if !c.Backends[0].UsesTLS() {
+		t.Error("UsesTLS should be true for an https host")
+	}
+}
+
+// Verification must be on unless it is explicitly turned off.
+func TestTLSVerificationOnByDefault(t *testing.T) {
+	c, err := Parse("test.yaml", []byte(minimal))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Backends[0].InsecureTLS() {
+		t.Fatal("certificate verification was disabled without being asked for")
+	}
+	// An explicit false is also honoured.
+	src := strings.Replace(minimal,
+		`    hosts: ["https://users.internal"]`,
+		"    hosts: [\"https://users.internal\"]\n    tls: { insecure_skip_verify: false }", 1)
+	c2, err := Parse("test.yaml", []byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c2.Backends[0].InsecureTLS() {
+		t.Error("an explicit false was read as true")
+	}
+}
+
+func TestUnknownTLSFieldIsRejected(t *testing.T) {
+	src := strings.Replace(minimal,
+		`    hosts: ["https://users.internal"]`,
+		"    hosts: [\"https://users.internal\"]\n    tls: { insecure_skip_verfy: true }", 1)
+	_, err := Parse("test.yaml", []byte(src))
+	if err == nil {
+		t.Fatal("a misspelled TLS field should be rejected, not silently ignored")
+	}
+}
+
+func TestUsesTLS(t *testing.T) {
+	tests := []struct {
+		name  string
+		hosts []string
+		spec  string
+		want  bool
+	}{
+		{"plain http", []string{"http://a.internal"}, "", false},
+		{"https host", []string{"https://a.internal"}, "", true},
+		{"https spec only", []string{"http://a.internal"}, "https://a.internal/o.json", true},
+		{"mixed hosts", []string{"http://a.internal", "https://b.internal"}, "", true},
+	}
+	for _, tc := range tests {
+		b := Backend{Hosts: tc.hosts, Spec: SpecSource{URL: tc.spec}}
+		if got := b.UsesTLS(); got != tc.want {
+			t.Errorf("%s: UsesTLS() = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

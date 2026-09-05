@@ -58,6 +58,8 @@ func Handler(o Options) http.Handler {
 			Breaker string   `json:"circuit_breaker"`
 			Healthy []string `json:"healthy_hosts"`
 			Down    []string `json:"unhealthy_hosts"`
+			// Surfaced so this can be audited without reading the config.
+			InsecureTLS bool `json:"tls_verification_disabled,omitempty"`
 		}
 		out := struct {
 			Version    string          `json:"version"`
@@ -72,7 +74,11 @@ func Handler(o Options) http.Handler {
 			Degraded:   rt.Table.Degraded,
 		}
 		for _, b := range rt.Backends() {
-			bs := backendStatus{Name: b.Name, Breaker: b.Breaker().State().String()}
+			bs := backendStatus{
+				Name:        b.Name,
+				Breaker:     b.Breaker().State().String(),
+				InsecureTLS: b.InsecureTLS(),
+			}
 			for _, h := range b.Pool().Hosts() {
 				if h.Healthy() {
 					bs.Healthy = append(bs.Healthy, h.URL.Host)

@@ -74,6 +74,29 @@ empty string.
 **Unknown fields are rejected.** A silently ignored typo in a gateway config is a
 production incident waiting to happen.
 
+### Upstream TLS
+
+Certificate verification is on by default. A backend presenting a self-signed or
+otherwise unverifiable certificate can opt out:
+
+```yaml
+backends:
+  - name: legacy
+    hosts: ["https://legacy.internal"]
+    tls:
+      insecure_skip_verify: true
+```
+
+This applies to every connection to that backend — proxied traffic, active health
+checks, and the fetch of its OpenAPI document — and to that backend only. The
+connection stays encrypted but is no longer authenticated: any certificate is
+accepted, so an attacker interposed on the path to the upstream would not be
+detected. Where the issuing CA can be trusted instead, do that.
+
+Turning it on logs a warning on every runtime build and shows up as
+`tls_verification_disabled` on the admin `/status` endpoint, so it can be audited
+without reading the config.
+
 ### Merging strategy
 
 Each backend gets a namespace derived from its name (`user-profiles` becomes
