@@ -6,6 +6,8 @@ paths:
   /orders:
     get:
       operationId: listOrders
+      security:
+        - bearerAuth: []
       responses:
         '200':
           description: ok
@@ -47,6 +49,11 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Order' }
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
   schemas:
     Order:
       type: object

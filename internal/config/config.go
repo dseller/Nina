@@ -89,6 +89,12 @@ type Backend struct {
 	// Namespace overrides the component-name prefix in the published document.
 	// Defaults to a capitalised form of Name.
 	Namespace string `json:"namespace"`
+	// SecuritySchemeNames overrides the published name of this backend's
+	// security schemes, keyed by the name the backend's own document declares.
+	// The chosen name is published verbatim, without the Namespace prefix,
+	// because the whole point of choosing one is to control what a
+	// documentation viewer puts on its credential box.
+	SecuritySchemeNames map[string]string `json:"security_scheme_names"`
 	// StripPrefix is removed from the front of each upstream path before the
 	// gateway prefix is applied.
 	StripPrefix string `json:"strip_prefix"`

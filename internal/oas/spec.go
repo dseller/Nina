@@ -243,6 +243,21 @@ func (s *Spec) component(section, name string) *yaml.Node {
 	return mapGet(sec, name)
 }
 
+// SecuritySchemes returns the names declared under components.securitySchemes,
+// in document order.
+func (s *Spec) SecuritySchemes() []string {
+	comps := mapGet(s.root, "components")
+	if comps == nil {
+		return nil
+	}
+	return mapKeys(mapGet(comps, "securitySchemes"))
+}
+
+// rootSecurity returns the document-level `security` node. An operation that
+// declares none inherits this, so the merger has to consult it before deciding
+// an upstream operation is unauthenticated.
+func (s *Spec) rootSecurity() *yaml.Node { return mapGet(s.root, "security") }
+
 // normalise30 rewrites OpenAPI 3.0 schema idioms into their 3.1 equivalents so
 // the merged document is valid 3.1 and so request validation can assume JSON
 // Schema 2020-12 semantics throughout.

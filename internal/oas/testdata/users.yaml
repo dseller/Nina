@@ -2,6 +2,8 @@ openapi: 3.0.3
 info:
   title: Users API
   version: 1.2.0
+security:
+  - bearerAuth: []
 paths:
   /users:
     get:
@@ -38,6 +40,10 @@ paths:
   /users/{id}:
     get:
       operationId: getUser
+      security:
+        - bearerAuth: []
+          apiKey: []
+        - {}
       parameters:
         - name: id
           in: path
@@ -52,9 +58,20 @@ paths:
   /internal/debug:
     get:
       operationId: internalDebug
+      security:
+        - neverDeclared: []
       responses:
         '200': { description: ok }
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    apiKey:
+      type: apiKey
+      in: header
+      name: X-Api-Key
   parameters:
     TraceId:
       name: X-Trace-Id

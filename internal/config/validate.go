@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -33,6 +34,11 @@ func (p *problems) addf(path, format string, args ...any) {
 }
 
 var nameRe = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]*$`)
+
+// componentNameRe is the character set OpenAPI permits in a components key. A
+// name outside it produces a document tools reject, so it is worth catching
+// here rather than in whatever consumes the published spec.
+var componentNameRe = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 
 // applyDefaults fills in the values the rest of the system assumes are present.
 func (c *Config) applyDefaults() {
@@ -199,6 +205,7 @@ func (c *Config) Validate() error {
 		if b.StripPrefix != "" && !strings.HasPrefix(b.StripPrefix, "/") {
 			p.addf(path+".strip_prefix", "must start with /, got %q", b.StripPrefix)
 		}
+		validateSchemeNames(&p, path, b.SecuritySchemeNames)
 		if b.CircuitBreaker != nil {
 			validateBreaker(&p, path+".circuit_breaker", b.CircuitBreaker)
 		}
@@ -270,6 +277,42 @@ func (c *Config) Validate() error {
 		return p.errs
 	}
 	return nil
+}
+
+// validateSchemeNames checks the published names a backend chooses for its
+// security schemes. Sorted iteration keeps the reported problems in a stable
+// order across runs.
+func validateSchemeNames(p *problems, path string, names map[string]string) {
+	if len(names) == 0 {
+		return
+	}
+	base := path + ".security_scheme_names"
+	from := make([]string, 0, len(names))
+	for k := range names {
+		from = append(from, k)
+	}
+	sort.Strings(from)
+
+	claimed := map[string]string{}
+	for _, k := range from {
+		to := names[k]
+		switch {
+		case k == "":
+			p.addf(base, "an entry has an empty key; the key is the scheme name the backend's own document declares")
+			continue
+		case to == "":
+			p.addf(base+"."+k, "must not be empty")
+			continue
+		case !componentNameRe.MatchString(to):
+			p.addf(base+"."+k, "%q is not a usable component name; use only letters, digits, and . - _", to)
+			continue
+		}
+		if prev, dup := claimed[to]; dup {
+			p.addf(base+"."+k, "%q is already the published name for %q; two schemes cannot share one name", to, prev)
+			continue
+		}
+		claimed[to] = k
+	}
 }
 
 func validateBreaker(p *problems, path string, cb *CircuitBreaker) {
