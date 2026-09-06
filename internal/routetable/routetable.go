@@ -92,7 +92,15 @@ func Build(in BuildInput) (*Table, error) {
 		}
 		src, ok := sources[e.Backend]
 		if !ok {
-			src = &oas.SpecSource{Spec: spec, Backend: backend.Name, Namespace: backend.Namespace}
+			if err := checkSchemeNames(backend, spec); err != nil {
+				return nil, err
+			}
+			src = &oas.SpecSource{
+				Spec:        spec,
+				Backend:     backend.Name,
+				Namespace:   backend.Namespace,
+				SchemeNames: backend.SecuritySchemeNames,
+			}
 			sources[e.Backend] = src
 		}
 
@@ -212,6 +220,37 @@ func Build(in BuildInput) (*Table, error) {
 		SpecJSON: jsonBytes,
 		Degraded: in.Degraded,
 	}, nil
+}
+
+// checkSchemeNames rejects a published-name override for a scheme the backend's
+// document does not declare. Ignoring it silently would leave the derived name
+// in the document with nothing to say why the chosen one had no effect, which is
+// the same class of quiet failure as an include glob that matches nothing.
+func checkSchemeNames(b *config.Backend, spec *oas.Spec) error {
+	if len(b.SecuritySchemeNames) == 0 {
+		return nil
+	}
+	declared := spec.SecuritySchemes()
+	have := make(map[string]bool, len(declared))
+	for _, n := range declared {
+		have[n] = true
+	}
+	names := make([]string, 0, len(b.SecuritySchemeNames))
+	for n := range b.SecuritySchemeNames {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		if have[n] {
+			continue
+		}
+		if len(declared) == 0 {
+			return fmt.Errorf("backend %q: security_scheme_names renames %q, but the backend's document declares no security schemes at all", b.Name, n)
+		}
+		return fmt.Errorf("backend %q: security_scheme_names renames %q, which the backend's document does not declare; it declares %s",
+			b.Name, n, strings.Join(declared, ", "))
+	}
+	return nil
 }
 
 func securitySchemes(cfg *config.Config, fn SecuritySchemeFunc) map[string]*yaml.Node {

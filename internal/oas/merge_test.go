@@ -302,3 +302,218 @@ func TestNormalise30(t *testing.T) {
 		t.Error("`minimum` should be consumed by the exclusiveMinimum rewrite")
 	}
 }
+
+// TestMergePublishesSecuritySchemes covers the invariant that makes the
+// published document usable in a documentation viewer: every scheme an
+// operation requires must be described in components.securitySchemes, or the
+// viewer shows a locked operation with no way to supply a credential.
+func TestMergePublishesSecuritySchemes(t *testing.T) {
+	root, _ := mergeFixtures(t, false)
+	paths := mapGet(root, "paths")
+	schemes := mapGet(mapGet(root, "components"), "securitySchemes")
+
+	for _, name := range []string{"UsersBearerAuth", "UsersApiKey", "OrdersBearerAuth"} {
+		if mapGet(schemes, name) == nil {
+			t.Errorf("missing security scheme %s (have %v)", name, mapKeys(schemes))
+		}
+	}
+	if bearer := mapGet(schemes, "UsersBearerAuth"); bearer != nil {
+		if v := mapGet(bearer, "scheme"); v == nil || v.Value != "bearer" {
+			t.Errorf("UsersBearerAuth scheme = %v, want bearer", v)
+		}
+	}
+
+	// An operation that declares nothing inherits the source document's
+	// requirement; the gateway's own top-level security describes the gateway.
+	list := mapGet(mapGet(paths, "/api/users"), "get")
+	if got := securityNames(mapGet(list, "security")); len(got) != 1 || got[0] != "UsersBearerAuth" {
+		t.Errorf("listUsers security = %v, want [UsersBearerAuth]", got)
+	}
+
+	// An operation-level requirement wins, keeps its alternatives in order, and
+	// keeps the empty alternative that means "authentication is optional".
+	get := mapGet(mapGet(paths, "/api/users/{id}"), "get")
+	sec := mapGet(get, "security")
+	if sec == nil || len(sec.Content) != 2 {
+		t.Fatalf("getUser security = %v, want 2 alternatives", securityNames(sec))
+	}
+	first := mapKeys(sec.Content[0])
+	if len(first) != 2 || first[0] != "UsersBearerAuth" || first[1] != "UsersApiKey" {
+		t.Errorf("getUser first alternative = %v, want [UsersBearerAuth UsersApiKey]", first)
+	}
+	if len(sec.Content[1].Content) != 0 {
+		t.Errorf("the empty alternative must survive, got %v", mapKeys(sec.Content[1]))
+	}
+}
+
+// TestMergeDropsUndeclaredSecuritySchemes: an upstream naming a scheme it never
+// declared must not leave a requirement pointing at nothing. Dropping it is the
+// only honest option, and it must not degrade into `{}`, which would claim the
+// operation needs no authentication at all.
+func TestMergeDropsUndeclaredSecuritySchemes(t *testing.T) {
+	root, _ := mergeFixtures(t, false)
+	op := mapGet(mapGet(mapGet(root, "paths"), "/api/internal/debug"), "get")
+	if op == nil {
+		t.Fatal("GET /api/internal/debug missing")
+	}
+	if sec := mapGet(op, "security"); sec != nil {
+		t.Errorf("security = %v, want the key to be dropped entirely", securityNames(sec))
+	}
+}
+
+// TestMergeDedupeRenamesSecurityRequirements: requirements name schemes rather
+// than $ref-ing them, so the dedupe pass's ref rewrite cannot reach them.
+func TestMergeDedupeRenamesSecurityRequirements(t *testing.T) {
+	root, _ := mergeFixtures(t, true)
+	schemes := mapGet(mapGet(root, "components"), "securitySchemes")
+
+	// The two backends' bearerAuth are identical, so they collapse.
+	if mapGet(schemes, "BearerAuth") == nil {
+		t.Fatalf("expected a deduped BearerAuth, have %v", mapKeys(schemes))
+	}
+	for _, gone := range []string{"UsersBearerAuth", "OrdersBearerAuth"} {
+		if mapGet(schemes, gone) != nil {
+			t.Errorf("%s should have collapsed into BearerAuth", gone)
+		}
+	}
+
+	for _, tc := range []struct{ path, want string }{
+		{"/api/users", "BearerAuth"},
+		{"/api/orders", "BearerAuth"},
+	} {
+		op := mapGet(mapGet(mapGet(root, "paths"), tc.path), "get")
+		got := securityNames(mapGet(op, "security"))
+		if len(got) != 1 || got[0] != tc.want {
+			t.Errorf("GET %s security = %v, want [%s]", tc.path, got, tc.want)
+		}
+	}
+}
+
+// TestMergeNoDanglingSecurityRequirements is the security-scheme counterpart of
+// TestMergeNoDanglingRefs.
+func TestMergeNoDanglingSecurityRequirements(t *testing.T) {
+	for _, dedupe := range []bool{false, true} {
+		root, _ := mergeFixtures(t, dedupe)
+		schemes := mapGet(mapGet(root, "components"), "securitySchemes")
+		var bad []string
+		for _, item := range mapGet(root, "paths").Content {
+			for _, op := range item.Content {
+				if op.Kind != yaml.MappingNode {
+					continue
+				}
+				for _, name := range securityNames(mapGet(op, "security")) {
+					if mapGet(schemes, name) == nil {
+						bad = append(bad, name)
+					}
+				}
+			}
+		}
+		if len(bad) > 0 {
+			t.Errorf("dedupe=%v: requirements naming undeclared schemes: %v", dedupe, bad)
+		}
+	}
+}
+
+// securityNames flattens a `security` node to the scheme names it references.
+func securityNames(sec *yaml.Node) []string {
+	if sec == nil {
+		return nil
+	}
+	var out []string
+	for _, req := range sec.Content {
+		out = append(out, mapKeys(req)...)
+	}
+	return out
+}
+
+// TestMergeHonoursChosenSchemeNames: the published name is what a documentation
+// viewer labels its credential box with, so a configured name must survive
+// verbatim — unprefixed, and untouched by the dedupe pass.
+func TestMergeHonoursChosenSchemeNames(t *testing.T) {
+	users := &SpecSource{
+		Spec: loadFixture(t, "users.yaml"), Backend: "users", Namespace: "Users",
+		SchemeNames: map[string]string{"bearerAuth": "Bearer"},
+	}
+	orders := &SpecSource{Spec: loadFixture(t, "orders.yaml"), Backend: "orders", Namespace: "Orders"}
+
+	root, err := Merge(append(exposeAll(users, "/api"), exposeAll(orders, "/api")...), MergeOptions{Dedupe: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	schemes := mapGet(mapGet(root, "components"), "securitySchemes")
+
+	if mapGet(schemes, "Bearer") == nil {
+		t.Fatalf("chosen name Bearer was not published, have %v", mapKeys(schemes))
+	}
+	if mapGet(schemes, "UsersBearerAuth") != nil {
+		t.Error("the derived name should have been replaced, not published alongside")
+	}
+	// Only the chosen scheme is exempt; the backend's other schemes still derive.
+	if mapGet(schemes, "UsersApiKey") == nil {
+		t.Errorf("unchosen schemes should still be namespaced, have %v", mapKeys(schemes))
+	}
+	// The orders backend chose nothing, so its identical bearerAuth must not be
+	// dragged onto the chosen name behind the operator's back.
+	if mapGet(schemes, "OrdersBearerAuth") == nil {
+		t.Errorf("orders' scheme should still be namespaced, have %v", mapKeys(schemes))
+	}
+
+	list := mapGet(mapGet(mapGet(root, "paths"), "/api/users"), "get")
+	if got := securityNames(mapGet(list, "security")); len(got) != 1 || got[0] != "Bearer" {
+		t.Errorf("listUsers security = %v, want [Bearer]", got)
+	}
+}
+
+// TestMergeSharesOneChosenSchemeName: two backends choosing one name for the
+// same credential is how an operator says "these really are the same token".
+func TestMergeSharesOneChosenSchemeName(t *testing.T) {
+	users := &SpecSource{
+		Spec: loadFixture(t, "users.yaml"), Backend: "users", Namespace: "Users",
+		SchemeNames: map[string]string{"bearerAuth": "Bearer"},
+	}
+	orders := &SpecSource{
+		Spec: loadFixture(t, "orders.yaml"), Backend: "orders", Namespace: "Orders",
+		SchemeNames: map[string]string{"bearerAuth": "Bearer"},
+	}
+
+	root, err := Merge(append(exposeAll(users, "/api"), exposeAll(orders, "/api")...), MergeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	schemes := mapGet(mapGet(root, "components"), "securitySchemes")
+	if mapGet(schemes, "Bearer") == nil || mapGet(schemes, "Bearer2") != nil {
+		t.Fatalf("expected one shared Bearer, have %v", mapKeys(schemes))
+	}
+	for _, p := range []string{"/api/users", "/api/orders"} {
+		op := mapGet(mapGet(mapGet(root, "paths"), p), "get")
+		got := securityNames(mapGet(op, "security"))
+		if len(got) != 1 || got[0] != "Bearer" {
+			t.Errorf("GET %s security = %v, want [Bearer]", p, got)
+		}
+	}
+}
+
+// TestMergeRejectsConflictingSchemeName: sharing a name is only sound when the
+// schemes agree. Publishing one of two different credentials under a single name
+// would misdescribe how to call half the gateway.
+func TestMergeRejectsConflictingSchemeName(t *testing.T) {
+	users := &SpecSource{
+		Spec: loadFixture(t, "users.yaml"), Backend: "users", Namespace: "Users",
+		SchemeNames: map[string]string{"bearerAuth": "Auth"},
+	}
+	orders := &SpecSource{
+		Spec: loadFixture(t, "users.yaml"), Backend: "orders", Namespace: "Orders",
+		// apiKey is a different shape from users' bearerAuth.
+		SchemeNames: map[string]string{"apiKey": "Auth"},
+	}
+
+	_, err := Merge(append(exposeAll(users, "/a"), exposeAll(orders, "/b")...), MergeOptions{})
+	if err == nil {
+		t.Fatal("expected a conflict error")
+	}
+	for _, want := range []string{"Auth", "users", "orders"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should mention %q, got: %v", want, err)
+		}
+	}
+}

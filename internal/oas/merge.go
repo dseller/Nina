@@ -23,6 +23,24 @@ type SpecSource struct {
 	Backend string
 	// Namespace prefixes component names, e.g. "Users" turns User into UsersUser.
 	Namespace string
+	// SchemeNames maps a security scheme's upstream name to the name it should
+	// be published under. A chosen name is used verbatim, without Namespace.
+	SchemeNames map[string]string
+}
+
+// pinnedName returns the operator-chosen published name for a component, if
+// there is one. Only security schemes can be named this way: their names are
+// what a documentation viewer labels its credential box with, so they are the
+// one part of the component namespace worth exposing to configuration.
+func (s *SpecSource) pinnedName(section, name string) (string, bool) {
+	if section != "securitySchemes" || len(s.SchemeNames) == 0 {
+		return "", false
+	}
+	published, ok := s.SchemeNames[name]
+	if !ok || published == "" {
+		return "", false
+	}
+	return published, true
 }
 
 // ExposedOp is a single upstream operation as it will be published by the gateway.
@@ -82,6 +100,10 @@ type importedComp struct {
 	node     *yaml.Node
 	baseName string // original name in the source document
 	key      compKey
+	// pinned marks a name chosen by configuration rather than derived. Such a
+	// name is never rewritten: the dedupe pass leaves it alone, and a clash with
+	// it is an error rather than something to suffix around.
+	pinned bool
 }
 
 // claim records which operation node occupies a (path, method) slot, and who put
@@ -142,9 +164,11 @@ func (m *merger) run(ops []ExposedOp) (*yaml.Node, error) {
 		aliases = m.dedupe()
 	}
 	m.applyAliases(aliases)
+	schemeRenames := schemeAliases(aliases)
 	for _, byMethod := range pathOps {
 		for _, c := range byMethod {
 			rewriteRefs(c.node, aliases)
+			renameSecuritySchemes(c.node, schemeRenames)
 		}
 	}
 
@@ -168,6 +192,10 @@ func (m *merger) buildOperation(e ExposedOp) (*yaml.Node, error) {
 	mapSet(node, "x-nina-backend", newScalar(e.Source.Backend))
 	mapSet(node, "x-nina-upstream-path", newScalar(e.Op.Path))
 	mapSet(node, "x-nina-upstream-operation-id", newScalar(e.Op.OperationID))
+
+	if err := m.rewriteSecurity(e.Source, node); err != nil {
+		return nil, err
+	}
 
 	rename := map[string]string{}
 	var err error
@@ -206,6 +234,86 @@ func (m *merger) resolveRef(src *SpecSource, ref string) (string, error) {
 	return out, nil
 }
 
+// rewriteSecurity republishes an operation's security requirements against the
+// gateway's namespaced securitySchemes.
+//
+// A requirement names a scheme rather than $ref-ing it, so the $ref walk never
+// sees one. Without this the merged document carries requirement names pointing
+// at schemes that were never imported: a documentation viewer then shows an
+// operation as authenticated but offers no way to supply the credential, which
+// is precisely the failure this exists to prevent.
+//
+// An operation that states no requirement of its own inherits the source
+// document's, because the merged document's own top-level `security` describes
+// the gateway, not this upstream.
+func (m *merger) rewriteSecurity(src *SpecSource, op *yaml.Node) error {
+	sec := mapGet(op, "security")
+	if sec == nil {
+		if src.Spec == nil {
+			return nil
+		}
+		sec = deepCopy(src.Spec.rootSecurity())
+		if sec == nil {
+			return nil
+		}
+	}
+	if sec.Kind != yaml.SequenceNode {
+		return fmt.Errorf("`security` is not a sequence")
+	}
+
+	out := newSeq()
+	for _, req := range sec.Content {
+		if req.Kind != yaml.MappingNode {
+			return fmt.Errorf("`security` entry is not a mapping")
+		}
+		entry := newMap()
+		unresolved := false
+		for i := 0; i+1 < len(req.Content); i += 2 {
+			name, scopes := req.Content[i].Value, req.Content[i+1]
+			published, ok, err := m.enqueueScheme(src, name)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				unresolved = true
+				continue
+			}
+			mapSet(entry, published, deepCopy(scopes))
+		}
+		if unresolved && len(entry.Content) == 0 {
+			// Every scheme in this alternative names something the upstream never
+			// declared. Publishing the empty mapping would say "no authentication
+			// required", a far stronger claim than the upstream made, so the
+			// alternative is dropped instead.
+			continue
+		}
+		out.Content = append(out.Content, entry)
+	}
+
+	if len(out.Content) == 0 {
+		mapDelete(op, "security")
+		return nil
+	}
+	mapSet(op, "security", out)
+	return nil
+}
+
+// enqueueScheme is enqueue for a security scheme, reporting absence rather than
+// failing the merge. A requirement naming an undeclared scheme is a flaw in the
+// upstream document that the gateway cannot repair, and refusing to serve every
+// other route because of it would be a poor trade. Every other failure — a name
+// two backends both claim, say — is a real one and still stops the merge.
+func (m *merger) enqueueScheme(src *SpecSource, name string) (string, bool, error) {
+	if src.Spec == nil || src.Spec.component("securitySchemes", name) == nil {
+		return "", false, nil
+	}
+	published, err := m.enqueue(src, "securitySchemes", name)
+	if err != nil {
+		return "", false, err
+	}
+	return published, true, nil
+}
+
 // enqueue reserves a published name for a source component and schedules it for
 // copying. Names are namespaced, so two sources can never contend for one name.
 func (m *merger) enqueue(src *SpecSource, section, name string) (string, error) {
@@ -220,10 +328,31 @@ func (m *merger) enqueue(src *SpecSource, section, name string) (string, error) 
 	if node == nil {
 		return "", fmt.Errorf("dangling $ref: %s has no components.%s.%s", src.Backend, section, name)
 	}
-	published := src.Namespace + capitalise(name)
 	if m.comps[section] == nil {
 		m.comps[section] = map[string]*importedComp{}
 	}
+
+	if pinned, ok := src.pinnedName(section, name); ok {
+		if existing, taken := m.comps[section][pinned]; taken {
+			if !m.sameComponent(existing, src.Spec, section, name) {
+				return "", fmt.Errorf(
+					"security scheme name %q is claimed by both %s.%s and %s.%s, and the two are not identical: "+
+						"give them different names, or leave one to be namespaced",
+					pinned, m.sourceFor(existing.key.spec).Backend, existing.key.name, src.Backend, name)
+			}
+			// Two backends declaring the same scheme and choosing the same name
+			// for it: publish it once and point both at it. This is how an
+			// operator says "these really are the same credential".
+			m.imported[key] = pinned
+			return pinned, nil
+		}
+		m.imported[key] = pinned
+		m.comps[section][pinned] = &importedComp{baseName: name, key: key, pinned: true}
+		m.queue = append(m.queue, key)
+		return pinned, nil
+	}
+
+	published := src.Namespace + capitalise(name)
 	// Namespacing makes collisions vanishingly unlikely, but two different source
 	// names can still normalise to the same published name (e.g. "user" and
 	// "User"). Disambiguate rather than silently overwrite.
@@ -237,6 +366,56 @@ func (m *merger) enqueue(src *SpecSource, section, name string) (string, error) 
 	m.comps[section][published] = &importedComp{baseName: name, key: key}
 	m.queue = append(m.queue, key)
 	return published, nil
+}
+
+// sameComponent reports whether an already-imported component and a candidate
+// from another document are structurally identical. It compares the source nodes
+// rather than the imported ones because it runs during enqueue, before anything
+// has been copied.
+func (m *merger) sameComponent(existing *importedComp, spec *Spec, section, name string) bool {
+	a := existing.key.spec.component(existing.key.section, existing.key.name)
+	b := spec.component(section, name)
+	return canonicalRaw(a) == canonicalRaw(b)
+}
+
+// canonicalRaw renders a node to a stable string, sorting mapping keys so that
+// key order does not affect equality. Unlike merger.canonical it does not follow
+// $refs: it compares documents whose components have not been imported yet, and
+// a security scheme has no $refs to follow in any case.
+func canonicalRaw(n *yaml.Node) string {
+	if n == nil {
+		return "~"
+	}
+	switch n.Kind {
+	case yaml.MappingNode:
+		type kv struct{ k, v string }
+		items := make([]kv, 0, len(n.Content)/2)
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			items = append(items, kv{n.Content[i].Value, canonicalRaw(n.Content[i+1])})
+		}
+		sort.Slice(items, func(a, b int) bool { return items[a].k < items[b].k })
+		var b strings.Builder
+		b.WriteByte('{')
+		for _, it := range items {
+			b.WriteString(it.k)
+			b.WriteByte(':')
+			b.WriteString(it.v)
+			b.WriteByte(',')
+		}
+		b.WriteByte('}')
+		return b.String()
+	case yaml.SequenceNode:
+		var b strings.Builder
+		b.WriteByte('[')
+		for _, c := range n.Content {
+			b.WriteString(canonicalRaw(c))
+			b.WriteByte(',')
+		}
+		b.WriteByte(']')
+		return b.String()
+	default:
+		return n.Tag + "|" + n.Value
+	}
 }
 
 // drainQueue copies queued components, discovering further components as it goes.
@@ -292,6 +471,48 @@ func rewriteRefs(n *yaml.Node, rename map[string]string) {
 			ref.Style = 0
 		}
 	})
+}
+
+// schemeAliases reduces the dedupe pass's ref renames to the securityScheme name
+// renames among them, keyed by published name.
+func schemeAliases(aliases map[string]string) map[string]string {
+	out := map[string]string{}
+	for from, to := range aliases {
+		fromSec, fromName, fromTail, ok := parseLocalRef(from)
+		if !ok || fromSec != "securitySchemes" || fromTail != "" {
+			continue
+		}
+		_, toName, _, ok := parseLocalRef(to)
+		if !ok {
+			continue
+		}
+		out[fromName] = toName
+	}
+	return out
+}
+
+// renameSecuritySchemes updates security requirement names after a dedupe pass.
+// Requirements hold plain names rather than $refs, so rewriteRefs cannot reach
+// them and a collapsed scheme would otherwise leave the requirement dangling.
+func renameSecuritySchemes(op *yaml.Node, renames map[string]string) {
+	if len(renames) == 0 {
+		return
+	}
+	sec := mapGet(op, "security")
+	if sec == nil || sec.Kind != yaml.SequenceNode {
+		return
+	}
+	for _, req := range sec.Content {
+		if req.Kind != yaml.MappingNode {
+			continue
+		}
+		for i := 0; i+1 < len(req.Content); i += 2 {
+			if nv, ok := renames[req.Content[i].Value]; ok {
+				req.Content[i].Value = nv
+				req.Content[i].Style = 0
+			}
+		}
+	}
 }
 
 // foldPathParams merges path-item level parameters into the operation. Operation
@@ -368,6 +589,9 @@ func (m *merger) dedupe() map[string]string {
 
 	for section, byName := range m.comps {
 		for name, ic := range byName {
+			if ic.pinned {
+				continue // an operator chose this name; it is not ours to collapse
+			}
 			h := m.hashComponent(section, name, nil)
 			k := groupKey{section: section, base: ic.baseName, hash: h}
 			groups[k] = append(groups[k], name)

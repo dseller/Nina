@@ -290,3 +290,37 @@ func TestUsesTLS(t *testing.T) {
 		}
 	}
 }
+
+func TestSecuritySchemeNamesParsing(t *testing.T) {
+	src := strings.Replace(minimal,
+		`    hosts: ["https://users.internal"]`,
+		"    hosts: [\"https://users.internal\"]\n    security_scheme_names:\n      jwtAuth: Bearer", 1)
+	c, err := Parse("test.yaml", []byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Backends[0].SecuritySchemeNames["jwtAuth"]; got != "Bearer" {
+		t.Errorf("security_scheme_names[jwtAuth] = %q, want Bearer", got)
+	}
+}
+
+func TestSecuritySchemeNameValidation(t *testing.T) {
+	tests := map[string]struct{ entries, want string }{
+		"unusable character": {"jwtAuth: My Token", "not a usable component name"},
+		"empty name":         {`jwtAuth: ""`, "must not be empty"},
+		"two schemes, one name": {
+			"jwtAuth: Auth\n      cookieAuth: Auth", "cannot share one name",
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			src := strings.Replace(minimal,
+				`    hosts: ["https://users.internal"]`,
+				"    hosts: [\"https://users.internal\"]\n    security_scheme_names:\n      "+tc.entries, 1)
+			_, err := Parse("test.yaml", []byte(src))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %v, want one mentioning %q", err, tc.want)
+			}
+		})
+	}
+}

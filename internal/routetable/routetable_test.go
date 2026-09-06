@@ -326,3 +326,88 @@ func keys(m map[string]string) []string {
 	}
 	return out
 }
+
+const securedSpec = `
+openapi: 3.1.0
+info: { title: Svc, version: 1.0.0 }
+security:
+  - jwtAuth: []
+paths:
+  /v1/things:
+    get:
+      operationId: listThings
+      responses: { '200': { description: ok } }
+components:
+  securitySchemes:
+    jwtAuth: { type: http, scheme: bearer, bearerFormat: JWT }
+`
+
+func TestSecuritySchemeNameOverride(t *testing.T) {
+	cfg := `
+version: 1
+backends:
+  - name: svc
+    spec: { file: ./svc.yaml }
+    hosts: ["https://svc.internal"]
+    security_scheme_names:
+      jwtAuth: Bearer
+expose:
+  - backend: svc
+    prefix: /api
+`
+	tb, err := build(t, cfg, map[string]*oas.Spec{"svc": loadSpec(t, securedSpec)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(tb.SpecJSON), `"Bearer"`) {
+		t.Errorf("chosen scheme name is missing from the published document:\n%s", tb.SpecJSON)
+	}
+	if strings.Contains(string(tb.SpecJSON), "SvcJwtAuth") {
+		t.Errorf("derived name should have been replaced:\n%s", tb.SpecJSON)
+	}
+}
+
+// A rename that matches nothing would leave the derived name in the document
+// with no hint as to why, so it has to be reported rather than ignored.
+func TestSecuritySchemeNameTypoIsAnError(t *testing.T) {
+	cfg := `
+version: 1
+backends:
+  - name: svc
+    spec: { file: ./svc.yaml }
+    hosts: ["https://svc.internal"]
+    security_scheme_names:
+      jwtAuht: Bearer
+expose:
+  - backend: svc
+    prefix: /api
+`
+	_, err := build(t, cfg, map[string]*oas.Spec{"svc": loadSpec(t, securedSpec)})
+	if err == nil {
+		t.Fatal("expected an error naming the unknown scheme")
+	}
+	for _, want := range []string{"jwtAuht", "jwtAuth"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should mention %q, got: %v", want, err)
+		}
+	}
+}
+
+func TestSecuritySchemeNameOnSpecWithoutSchemes(t *testing.T) {
+	cfg := `
+version: 1
+backends:
+  - name: svc
+    spec: { file: ./svc.yaml }
+    hosts: ["https://svc.internal"]
+    security_scheme_names:
+      jwtAuth: Bearer
+expose:
+  - backend: svc
+    prefix: /api
+`
+	_, err := build(t, cfg, map[string]*oas.Spec{"svc": loadSpec(t, svcSpec)})
+	if err == nil || !strings.Contains(err.Error(), "no security schemes at all") {
+		t.Errorf("error = %v, want one saying the document declares no schemes", err)
+	}
+}
