@@ -4,7 +4,8 @@
 // specs are resolved once into a Table, and both the HTTP router and the
 // published OpenAPI document are then derived from that same Table. A route that
 // is not served cannot appear in the document, and a route that is served always
-// does.
+// does unless it was explicitly hidden by tag (see Route.Hidden), which is the
+// one direction the invariant can be relaxed in.
 package routetable
 
 import (
@@ -38,6 +39,12 @@ type Route struct {
 	// advertise the truth rather than guessing from a single operation.
 	AllowedMethods []string
 
+	// Hidden means the operation carried one of spec.hide_tags and was left out
+	// of the published document. It is served exactly like any other route: the
+	// same middleware chain, the same request validation. Only the documentation
+	// is withheld.
+	Hidden bool
+
 	// Op and Spec are the upstream operation and its document, retained so that
 	// request validation compiles the very schemas that were published.
 	Op   *oas.Operation
@@ -49,13 +56,25 @@ func (r *Route) String() string { return r.Method + " " + r.GatewayPath }
 // Table is the resolved gateway.
 type Table struct {
 	Routes []*Route
-	// Spec is the merged OpenAPI 3.1 document rendered from Routes.
+	// Spec is the merged OpenAPI 3.1 document rendered from Routes, minus any
+	// route whose Hidden flag is set.
 	Spec *yaml.Node
 	// SpecYAML and SpecJSON are the serialised forms, built once at load.
 	SpecYAML []byte
 	SpecJSON []byte
 	// Degraded lists backends serving a stale cached spec.
 	Degraded []string
+}
+
+// HiddenRoutes returns the routes served but kept out of the published document.
+func (t *Table) HiddenRoutes() []*Route {
+	var out []*Route
+	for _, r := range t.Routes {
+		if r.Hidden {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // SecuritySchemeFunc lets the caller contribute securitySchemes derived from the
@@ -130,6 +149,7 @@ func Build(in BuildInput) (*Table, error) {
 			}
 
 			opID := operationID(backend.Name, op.OperationID)
+			hidden := cfg.Spec.Hidden(op.Tags)
 			routes = append(routes, &Route{
 				Method:              op.Method,
 				GatewayPath:         gatewayPath,
@@ -141,7 +161,14 @@ func Build(in BuildInput) (*Table, error) {
 				Timeout:             timeout,
 				Op:                  op,
 				Spec:                spec,
+				Hidden:              hidden,
 			})
+			if hidden {
+				// Nothing about the route changes; it simply never reaches the
+				// merger, so neither it nor the components only it references
+				// appear in the published document.
+				continue
+			}
 			exposed = append(exposed, oas.ExposedOp{
 				Source:      src,
 				Op:          op,
@@ -165,6 +192,23 @@ func Build(in BuildInput) (*Table, error) {
 		if err := checkParams(r); err != nil {
 			return nil, err
 		}
+	}
+
+	// Collisions are detected here rather than only in the merger because a
+	// hidden route never reaches the merger. Two routes claiming one slot must
+	// fail the build whether or not either of them is documented.
+	claimed := map[string]*Route{}
+	for _, r := range routes {
+		key := r.Method + " " + r.GatewayPath
+		if prev, dup := claimed[key]; dup {
+			return nil, &oas.CollisionError{
+				Method: r.Method,
+				Path:   r.GatewayPath,
+				A:      prev.Backend.Name + "." + prev.UpstreamOperationID,
+				B:      r.Backend.Name + "." + r.UpstreamOperationID,
+			}
+		}
+		claimed[key] = r
 	}
 
 	merged, err := oas.Merge(exposed, oas.MergeOptions{

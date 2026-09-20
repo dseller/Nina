@@ -16,7 +16,8 @@ gateway config ----------+        |
 
 Because the router and the published document are built from the same structure,
 **a route that is not served cannot appear in the document, and a route that is
-served always does.** There is a test that asserts exactly this.
+served always does** — unless you hide it on purpose with
+[`spec.hide_tags`](#hiding-endpoints). There is a test that asserts exactly this.
 
 ## Quick start
 
@@ -50,7 +51,7 @@ GET     /api/users/{id}      -> users   /v1/users/{id}
 | | |
 |---|---|
 | **Spec ingest** | OpenAPI 3.0 and 3.1, from files or URLs, with ETag caching and periodic re-fetch. External `$ref`s are bundled; 3.0 idioms (`nullable`, boolean `exclusiveMinimum`) are normalised to their 3.1 form |
-| **Spec publish** | One merged 3.1 document at `/openapi.json`, `/openapi.yaml` and `/docs`, with `x-nina-*` provenance on every operation |
+| **Spec publish** | One merged 3.1 document at `/openapi.json`, `/openapi.yaml` and `/docs`, with `x-nina-*` provenance on every operation. Operations carrying a configured tag can be served without being documented |
 | **Merging** | Components namespaced per backend (`UsersUser`); structurally identical components sharing a base name collapse to one (`Error`); route collisions are a hard error naming both claimants |
 | **Proxying** | 1:1 operation mapping, per-backend connection pools, streaming responses |
 | **Resilience** | Timeouts, bounded retries with jitter (idempotent methods only), circuit breaker, round-robin / least-conn / random load balancing, active health checks |
@@ -96,6 +97,41 @@ detected. Where the issuing CA can be trusted instead, do that.
 Turning it on logs a warning on every runtime build and shows up as
 `tls_verification_disabled` on the admin `/status` endpoint, so it can be audited
 without reading the config.
+
+### Hiding endpoints
+
+Some operations are served but should not be advertised: an internal maintenance
+call, a partner-only endpoint, an operation still being stabilised. List the tags
+that mark them and they stay out of the published document:
+
+```yaml
+spec:
+  hide_tags: ["internal", "partner-only"]
+```
+
+An operation is hidden when any of its upstream tags matches. Matching is exact
+and case-sensitive, because a tag is an arbitrary string in someone else's
+document and guessing at case would hide things nobody asked to hide.
+
+A hidden route is served exactly like any other: same middleware chain, same
+request validation against the same upstream schemas, same proxying. Only the
+documentation is withheld — along with any component that no visible operation
+references, so a hidden endpoint does not leak its schemas into the document.
+
+This is the only sanctioned way to break the document-matches-router invariant,
+so hidden routes stay auditable from outside the config: they are listed with
+`"hidden": true` on the admin `/routes` endpoint, counted as `hidden_routes` on
+`/status`, logged on every runtime build, and marked `[hidden]` by `nina check`.
+
+Two things this is not. It is not access control — the endpoint is still reachable
+by anyone who knows the path, so put auth middleware on it. And it is not
+`exclude`, which drops the operation from the route table entirely and therefore
+stops serving it:
+
+| | Served | Published |
+|---|---|---|
+| `expose.exclude` / `overrides.<id>.disabled` | no | no |
+| `spec.hide_tags` | yes | no |
 
 ### Merging strategy
 
@@ -147,8 +183,8 @@ public:
 | `/metrics` | Prometheus |
 | `/healthz` | Liveness |
 | `/readyz` | Ready once a runtime has been built. Deliberately **not** tied to upstream health, so one sick backend cannot pull the gateway out of a load balancer |
-| `/status` | Generation, route count, per-backend breaker state and host health |
-| `/routes` | What is served, and what it maps to |
+| `/status` | Generation, route count, hidden-route count, per-backend breaker state and host health |
+| `/routes` | What is served, what it maps to, and whether it is hidden from the document |
 | `/openapi.json`, `/openapi.yaml`, `/docs` | The merged document and a viewer |
 
 ### Reload

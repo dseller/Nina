@@ -24,6 +24,11 @@ spec:
   # Collapse structurally identical components that share a base name, so the
   # two services' Error schemas become one.
   dedupe: true
+  # Operations carrying any of these upstream tags are still served — same
+  # middleware, same validation — but are left out of the published document,
+  # along with any schema only they reference. Matching is exact. This hides an
+  # endpoint; it does not protect it, so keep auth middleware on it.
+  # hide_tags: ["internal"]
 
 defaults:
   timeout: 5s

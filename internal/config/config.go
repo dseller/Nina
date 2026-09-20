@@ -56,6 +56,24 @@ type SpecPublish struct {
 	// Dedupe collapses structurally identical components sharing a base name.
 	// Defaults to true.
 	Dedupe *bool `json:"dedupe"`
+	// HideTags lists upstream operation tags that keep an operation out of the
+	// published document. The route is still built, routed and proxied with its
+	// full middleware chain; it is only undocumented. Matching is exact and
+	// case-sensitive, and one matching tag is enough.
+	HideTags []string `json:"hide_tags"`
+}
+
+// Hidden reports whether an operation carrying these tags is kept out of the
+// published document.
+func (s SpecPublish) Hidden(tags []string) bool {
+	for _, t := range tags {
+		for _, h := range s.HideTags {
+			if t == h {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 type Defaults struct {
