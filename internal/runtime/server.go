@@ -31,15 +31,25 @@ type Server struct {
 	log     *slog.Logger
 	metrics *observ.Metrics
 
-	configPath     string
-	drainGrace     time.Duration
-	trustedProxies []*net.IPNet
-	maxBody        int64
+	configPath string
+	drainGrace time.Duration
+	// settings holds the request-scoped knobs a reload can change. Swapped as
+	// a unit so a request never mixes the CIDR list of one generation with the
+	// body limit of another.
+	settings atomic.Pointer[serverSettings]
 
 	generation atomic.Uint64
 	ready      atomic.Bool
 	// reloadMu serialises reloads so two triggers cannot build at once.
 	reloadMu sync.Mutex
+}
+
+// serverSettings is immutable once stored: a reload builds a fresh value and
+// swaps the pointer rather than mutating the fields a live request may be
+// reading.
+type serverSettings struct {
+	trustedProxies []*net.IPNet
+	maxBody        int64
 }
 
 // ServerOptions configures a Server.
@@ -64,8 +74,7 @@ func NewServer(ctx context.Context, cfg *config.Config, deps Deps, opt ServerOpt
 	if err != nil {
 		return nil, fmt.Errorf("server.trusted_proxy_cidrs: %w", err)
 	}
-	s.trustedProxies = trusted
-	s.maxBody = cfg.Server.MaxRequestBody
+	s.settings.Store(&serverSettings{trustedProxies: trusted, maxBody: cfg.Server.MaxRequestBody})
 
 	rt, err := Build(ctx, cfg, deps, s.generation.Add(1))
 	if err != nil {
@@ -118,10 +127,9 @@ func (s *Server) Reload(ctx context.Context, reason string) error {
 	}
 
 	old := s.current.Swap(rt)
-	// These two are read on the hot path but only ever written here, under
-	// reloadMu, and a stale read for one request is harmless.
-	s.trustedProxies = trusted
-	s.maxBody = cfg.Server.MaxRequestBody
+	// Read on the hot path, written only here under reloadMu. A request that
+	// started before this point keeps the previous settings to completion.
+	s.settings.Store(&serverSettings{trustedProxies: trusted, maxBody: cfg.Server.MaxRequestBody})
 
 	if s.metrics != nil {
 		s.metrics.Reloads.WithLabelValues("success").Inc()
@@ -168,10 +176,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rt.Release()
 
+	set := s.settings.Load()
+
 	info := &reqctx.Info{
 		RequestID: requestID(r),
 		Start:     time.Now(),
-		ClientIP:  reqctx.ClientIP(r, s.trustedProxies),
+		ClientIP:  reqctx.ClientIP(r, set.trustedProxies),
 	}
 	r = r.WithContext(reqctx.With(r.Context(), info))
 	w.Header().Set("X-Request-Id", info.RequestID)
@@ -184,8 +194,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer s.finish(rec, r, info)
 	defer s.recover(rec, r, info)
 
-	if s.maxBody > 0 && r.Body != nil {
-		r.Body = http.MaxBytesReader(rec, r.Body, s.maxBody)
+	if set.maxBody > 0 && r.Body != nil {
+		r.Body = http.MaxBytesReader(rec, r.Body, set.maxBody)
 	}
 
 	match := rt.Router.Match(r.Method, r.URL.EscapedPath())
