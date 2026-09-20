@@ -1,0 +1,11 @@
+.git
+.github
+bin
+dist
+*.exe
+.spec-cache
+easybi.yaml
+Dockerfile
+.dockerignore
+PLAN.md
+README.md
