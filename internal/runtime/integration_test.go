@@ -63,6 +63,7 @@ paths:
   /internal/dump:
     get:
       operationId: internalDump
+      tags: [internal]
       responses:
         '200': { description: ok }
 components:
@@ -400,7 +401,8 @@ func TestGatewayValidatesRequests(t *testing.T) {
 
 // TestPublishedSpecMatchesServedRoutes is the invariant the whole design exists
 // to guarantee: the set of routes the router will match is exactly the set of
-// operations the published document advertises.
+// operations the published document advertises, minus any route deliberately
+// hidden by tag.
 func TestPublishedSpecMatchesServedRoutes(t *testing.T) {
 	users := newUpstream(t, usersSpec)
 	orders := newUpstream(t, ordersSpec)
@@ -408,11 +410,26 @@ func TestPublishedSpecMatchesServedRoutes(t *testing.T) {
 	defer cleanup()
 
 	rt := srv.Current()
+	if n := len(rt.Table.HiddenRoutes()); n != 0 {
+		t.Fatalf("this configuration hides nothing, yet %d routes are hidden", n)
+	}
+	checkSpecMatchesRoutes(t, rt)
+}
 
-	// What the gateway serves.
+// checkSpecMatchesRoutes asserts that every served route is published unless it
+// is hidden, that nothing published is unserved, and that every route resolves
+// in the router.
+func checkSpecMatchesRoutes(t *testing.T, rt *runtime.Runtime) {
+	t.Helper()
+
+	// What the gateway serves, and which of those are deliberately undocumented.
 	served := map[string]bool{}
+	hidden := map[string]bool{}
 	for _, r := range rt.Table.Routes {
 		served[r.Method+" "+r.GatewayPath] = true
+		if r.Hidden {
+			hidden[r.Method+" "+r.GatewayPath] = true
+		}
 	}
 
 	// What the document advertises.
@@ -430,7 +447,10 @@ func TestPublishedSpecMatchesServedRoutes(t *testing.T) {
 	}
 
 	for k := range served {
-		if !published[k] {
+		switch {
+		case hidden[k] && published[k]:
+			t.Errorf("route %s is hidden but still published", k)
+		case !hidden[k] && !published[k]:
 			t.Errorf("route %s is served but not published", k)
 		}
 	}
@@ -442,13 +462,89 @@ func TestPublishedSpecMatchesServedRoutes(t *testing.T) {
 	if len(served) == 0 {
 		t.Fatal("no routes were built")
 	}
-	t.Logf("verified %d routes match between router and published document", len(served))
+	t.Logf("verified %d routes match between router and published document (%d hidden)",
+		len(served), len(hidden))
 
-	// And every published route must actually resolve in the router.
+	// And every route must actually resolve in the router, hidden or not.
 	for _, r := range rt.Table.Routes {
 		concrete := strings.ReplaceAll(r.GatewayPath, "{id}", "sample")
 		if m := rt.Router.Match(r.Method, concrete); !m.Found {
-			t.Errorf("published route %s does not match its own path %s", r, concrete)
+			t.Errorf("route %s does not match its own path %s", r, concrete)
+		}
+	}
+}
+
+// TestHiddenRoutesAreServedButUndocumented covers the one deliberate relaxation
+// of that invariant: spec.hide_tags keeps an operation out of the document while
+// the gateway goes on serving it with its full middleware chain.
+func TestHiddenRoutesAreServedButUndocumented(t *testing.T) {
+	users := newUpstream(t, usersSpec)
+	orders := newUpstream(t, ordersSpec)
+	cfg := fmt.Sprintf(`
+version: 1
+server:
+  listen: ":0"
+spec:
+  title: Test Gateway
+  version: 9.9.9
+  hide_tags: ["internal"]
+defaults:
+  timeout: 5s
+backends:
+  - name: users
+    spec: { url: %s/openapi.yaml }
+    hosts: ["%s"]
+  - name: orders
+    spec: { url: %s/openapi.yaml }
+    hosts: ["%s"]
+middleware:
+  strict:
+    type: validate
+    request: enforce
+expose:
+  - backend: users
+    prefix: /api
+    middleware: [strict]
+  - backend: orders
+    prefix: /api
+`, users.URL, users.URL, orders.URL, orders.URL)
+
+	srv, cleanup := buildGateway(t, cfg)
+	defer cleanup()
+	rt := srv.Current()
+
+	hidden := rt.Table.HiddenRoutes()
+	if len(hidden) != 1 || hidden[0].String() != "GET /api/internal/dump" {
+		t.Fatalf("HiddenRoutes() = %v, want just GET /api/internal/dump", hidden)
+	}
+	if !strings.Contains(string(rt.Table.SpecYAML), "/api/users") {
+		t.Fatal("hiding one operation should not disturb the rest of the document")
+	}
+	checkSpecMatchesRoutes(t, rt)
+
+	// A hidden route is a normal route: it serves, it proxies, and it keeps the
+	// middleware the expose block gave it.
+	gw := httptest.NewServer(srv)
+	defer gw.Close()
+	resp, err := http.Get(gw.URL + "/api/internal/dump")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("hidden route returned %d: %s", resp.StatusCode, b)
+	}
+	var got map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got["path"] != "/internal/dump" {
+		t.Errorf("upstream saw path %q, want /internal/dump", got["path"])
+	}
+	for _, r := range rt.Table.Routes {
+		if r.Hidden && len(r.Middleware) == 0 {
+			t.Errorf("hidden route %s lost its middleware chain", r)
 		}
 	}
 }

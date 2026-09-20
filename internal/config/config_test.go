@@ -290,3 +290,55 @@ func TestUsesTLS(t *testing.T) {
 		}
 	}
 }
+
+func TestHideTagsParsing(t *testing.T) {
+	src := strings.Replace(minimal, "version: 1",
+		"version: 1\nspec:\n  hide_tags: [internal, \"partner-only\"]", 1)
+	c, err := Parse("test.yaml", []byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Spec.HideTags) != 2 {
+		t.Fatalf("hide_tags = %v", c.Spec.HideTags)
+	}
+	if !c.Spec.Hidden([]string{"public", "internal"}) {
+		t.Error("one matching tag should be enough to hide an operation")
+	}
+	if c.Spec.Hidden([]string{"Internal"}) {
+		t.Error("tag matching must be exact, not case-insensitive")
+	}
+	if c.Spec.Hidden([]string{"public"}) || c.Spec.Hidden(nil) {
+		t.Error("an untagged or unmatched operation must stay published")
+	}
+}
+
+func TestHideTagsDefaultsToNothingHidden(t *testing.T) {
+	c, err := Parse("test.yaml", []byte(minimal))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Spec.HideTags) != 0 {
+		t.Errorf("hide_tags = %v, want empty", c.Spec.HideTags)
+	}
+	if c.Spec.Hidden([]string{"internal"}) {
+		t.Error("nothing may be hidden when hide_tags is unset")
+	}
+}
+
+func TestHideTagsValidation(t *testing.T) {
+	tests := []struct{ name, tags, want string }{
+		{"empty", `["internal", ""]`, "must not be empty"},
+		{"whitespace", `["internal", " internal"]`, "whitespace"},
+		{"duplicate", `["internal", "internal"]`, "duplicate tag"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			src := strings.Replace(minimal, "version: 1",
+				"version: 1\nspec:\n  hide_tags: "+tc.tags, 1)
+			_, err := Parse("test.yaml", []byte(src))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("expected an error containing %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
