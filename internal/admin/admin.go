@@ -62,16 +62,22 @@ func Handler(o Options) http.Handler {
 			InsecureTLS bool `json:"tls_verification_disabled,omitempty"`
 		}
 		out := struct {
-			Version    string          `json:"version"`
-			Generation uint64          `json:"generation"`
-			Routes     int             `json:"routes"`
-			Degraded   []string        `json:"degraded_backends,omitempty"`
-			Backends   []backendStatus `json:"backends"`
+			Version    string `json:"version"`
+			Generation uint64 `json:"generation"`
+			Routes     int    `json:"routes"`
+			// Surfaced so the served-but-undocumented set can be audited without
+			// reading the config.
+			HiddenRoutes int             `json:"hidden_routes,omitempty"`
+			HideTags     []string        `json:"hide_tags,omitempty"`
+			Degraded     []string        `json:"degraded_backends,omitempty"`
+			Backends     []backendStatus `json:"backends"`
 		}{
-			Version:    o.Version,
-			Generation: rt.Generation,
-			Routes:     len(rt.Table.Routes),
-			Degraded:   rt.Table.Degraded,
+			Version:      o.Version,
+			Generation:   rt.Generation,
+			Routes:       len(rt.Table.Routes),
+			HiddenRoutes: len(rt.Table.HiddenRoutes()),
+			HideTags:     rt.Config.Spec.HideTags,
+			Degraded:     rt.Table.Degraded,
 		}
 		for _, b := range rt.Backends() {
 			bs := backendStatus{
@@ -109,12 +115,16 @@ func Handler(o Options) http.Handler {
 			Backend     string   `json:"backend"`
 			Upstream    string   `json:"upstream_path"`
 			Middleware  []string `json:"middleware,omitempty"`
+			// Hidden routes are served but absent from the published document,
+			// so this listing is the only place they show up.
+			Hidden bool `json:"hidden,omitempty"`
 		}
 		out := make([]routeInfo, 0, len(rt.Table.Routes))
 		for _, rr := range rt.Table.Routes {
 			out = append(out, routeInfo{
 				Method: rr.Method, Path: rr.GatewayPath, OperationID: rr.OperationID,
 				Backend: rr.Backend.Name, Upstream: rr.UpstreamPath, Middleware: rr.Middleware,
+				Hidden: rr.Hidden,
 			})
 		}
 		w.Header().Set("Content-Type", "application/json")

@@ -134,10 +134,11 @@ func runCmd() *cobra.Command {
 				"version", version,
 				"listen", cfg.Server.Listen,
 				"routes", len(rt.Table.Routes),
+				"hidden_routes", len(rt.Table.HiddenRoutes()),
 				"backends", len(cfg.Backends))
 			for _, r := range rt.Table.Routes {
 				log.Debug("route", "method", r.Method, "path", r.GatewayPath,
-					"backend", r.Backend.Name, "operation", r.OperationID)
+					"backend", r.Backend.Name, "operation", r.OperationID, "hidden", r.Hidden)
 			}
 
 			gateway := &http.Server{
@@ -246,11 +247,19 @@ func checkCmd() *cobra.Command {
 			}
 			defer rt.Retire(0)
 
-			fmt.Fprintf(cmd.OutOrStdout(), "ok: %d routes across %d backends\n",
-				len(rt.Table.Routes), len(cfg.Backends))
+			hidden := rt.Table.HiddenRoutes()
+			fmt.Fprintf(cmd.OutOrStdout(), "ok: %d routes across %d backends", len(rt.Table.Routes), len(cfg.Backends))
+			if len(hidden) > 0 {
+				fmt.Fprintf(cmd.OutOrStdout(), " (%d hidden from the published document)", len(hidden))
+			}
+			fmt.Fprintln(cmd.OutOrStdout())
 			for _, r := range rt.Table.Routes {
-				fmt.Fprintf(cmd.OutOrStdout(), "  %-7s %-40s -> %s %s\n",
-					r.Method, r.GatewayPath, r.Backend.Name, r.UpstreamPath)
+				mark := ""
+				if r.Hidden {
+					mark = "  [hidden]"
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "  %-7s %-40s -> %s %s%s\n",
+					r.Method, r.GatewayPath, r.Backend.Name, r.UpstreamPath, mark)
 			}
 			if len(rt.Table.Degraded) > 0 {
 				fmt.Fprintf(cmd.ErrOrStderr(), "warning: serving cached specs for: %v\n", rt.Table.Degraded)

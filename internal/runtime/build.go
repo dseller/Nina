@@ -187,6 +187,17 @@ func Build(ctx context.Context, cfg *config.Config, deps Deps, generation uint64
 	if err != nil {
 		return nil, err
 	}
+	if hidden := table.HiddenRoutes(); len(hidden) > 0 {
+		// Logged on every build, not only the first: an endpoint that is served
+		// but absent from the document is invisible to anyone auditing the
+		// published API, so it has to be visible to anyone auditing the logs.
+		paths := make([]string, 0, len(hidden))
+		for _, r := range hidden {
+			paths = append(paths, r.String())
+		}
+		log.Info("routes are served but hidden from the published document",
+			"count", len(hidden), "tags", cfg.Spec.HideTags, "routes", paths)
+	}
 
 	// 5. Upstream backends.
 	for i := range cfg.Backends {

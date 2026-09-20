@@ -145,6 +145,24 @@ func (c *Config) Validate() error {
 		p.addf("server.listen", "must not be empty")
 	}
 
+	seenHidden := map[string]bool{}
+	for i, t := range c.Spec.HideTags {
+		path := fmt.Sprintf("spec.hide_tags[%d]", i)
+		if strings.TrimSpace(t) == "" {
+			p.addf(path, "must not be empty")
+			continue
+		}
+		if t != strings.TrimSpace(t) {
+			// Tags are compared verbatim against the upstream document, so a
+			// stray space would silently hide nothing.
+			p.addf(path, "%q has leading or trailing whitespace; tags are matched exactly", t)
+		}
+		if seenHidden[t] {
+			p.addf(path, "duplicate tag %q", t)
+		}
+		seenHidden[t] = true
+	}
+
 	backends := map[string]*Backend{}
 	for i := range c.Backends {
 		b := &c.Backends[i]

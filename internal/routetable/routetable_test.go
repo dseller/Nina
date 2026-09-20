@@ -326,3 +326,154 @@ func keys(m map[string]string) []string {
 	}
 	return out
 }
+
+// taggedSpec exercises hide_tags: one operation carries an `internal` tag and
+// is the only user of the Purge schema, so hiding it must take the schema with
+// it.
+const taggedSpec = `
+openapi: 3.1.0
+info: { title: Svc, version: 1.0.0 }
+paths:
+  /things:
+    get:
+      operationId: listThings
+      tags: [public]
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Thing' }
+  /admin/purge:
+    post:
+      operationId: adminPurge
+      tags: [public, internal]
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Purge' }
+      responses: { '200': { description: ok } }
+components:
+  schemas:
+    Thing:
+      type: object
+      properties: { id: { type: string } }
+    Purge:
+      type: object
+      properties: { force: { type: boolean } }
+`
+
+func TestHideTagsKeepsRouteButDropsItFromTheDocument(t *testing.T) {
+	cfg := `
+version: 1
+spec:
+  hide_tags: ["internal"]
+backends:
+  - name: svc
+    spec: { file: ./svc.yaml }
+    hosts: ["https://svc.internal"]
+expose:
+  - backend: svc
+    prefix: /api
+`
+	tb, err := build(t, cfg, map[string]*oas.Spec{"svc": loadSpec(t, taggedSpec)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Still served, with everything a visible route has.
+	got := routeSet(tb)
+	if _, ok := got["POST /api/admin/purge"]; !ok {
+		t.Fatalf("hidden route is no longer served; have %v", keys(got))
+	}
+	hidden := tb.HiddenRoutes()
+	if len(hidden) != 1 || hidden[0].String() != "POST /api/admin/purge" {
+		t.Fatalf("HiddenRoutes() = %v, want just POST /api/admin/purge", hidden)
+	}
+
+	// Absent from the document, along with the schema only it referenced.
+	doc := string(tb.SpecYAML)
+	if strings.Contains(doc, "/api/admin/purge") {
+		t.Errorf("hidden route appears in the published document:\n%s", doc)
+	}
+	if strings.Contains(doc, "Purge") {
+		t.Errorf("schema reachable only from a hidden route was published:\n%s", doc)
+	}
+	// The visible route and its components are untouched.
+	if !strings.Contains(doc, "/api/things") || !strings.Contains(doc, "SvcThing") {
+		t.Errorf("visible route or its schema went missing:\n%s", doc)
+	}
+}
+
+func TestHideTagsMatchesAnyTagAndIsExact(t *testing.T) {
+	cfgFor := func(tag string) string {
+		return `
+version: 1
+spec:
+  hide_tags: ["` + tag + `"]
+backends:
+  - name: svc
+    spec: { file: ./svc.yaml }
+    hosts: ["https://svc.internal"]
+expose:
+  - backend: svc
+    prefix: /api
+`
+	}
+	// `public` is carried by both operations, so both are hidden.
+	tb, err := build(t, cfgFor("public"), map[string]*oas.Spec{"svc": loadSpec(t, taggedSpec)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(tb.HiddenRoutes()); n != 2 {
+		t.Errorf("hid %d routes on a tag both operations carry, want 2", n)
+	}
+	if !strings.Contains(string(tb.SpecYAML), "paths:") {
+		t.Errorf("a document with every operation hidden should still render:\n%s", tb.SpecYAML)
+	}
+
+	// Matching is exact: a different case hides nothing.
+	tb, err = build(t, cfgFor("Internal"), map[string]*oas.Spec{"svc": loadSpec(t, taggedSpec)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(tb.HiddenRoutes()); n != 0 {
+		t.Errorf("tag matching is not exact: %d routes hidden on a case mismatch", n)
+	}
+}
+
+func TestHiddenRouteStillCollides(t *testing.T) {
+	// Hiding a route removes it from the document, not from the router, so it
+	// must still fail the build rather than produce two routes for one slot.
+	cfg := `
+version: 1
+spec:
+  hide_tags: ["internal"]
+backends:
+  - name: a
+    spec: { file: ./a.yaml }
+    hosts: ["https://a.internal"]
+  - name: b
+    spec: { file: ./b.yaml }
+    hosts: ["https://b.internal"]
+expose:
+  - backend: a
+    prefix: /api
+    include: ["adminPurge"]
+  - backend: b
+    prefix: /api
+    include: ["adminPurge"]
+`
+	specs := map[string]*oas.Spec{
+		"a": loadSpec(t, taggedSpec),
+		"b": loadSpec(t, taggedSpec),
+	}
+	_, err := build(t, cfg, specs)
+	if err == nil {
+		t.Fatal("expected a collision error between two hidden routes")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "collision") || !strings.Contains(msg, "a.") || !strings.Contains(msg, "b.") {
+		t.Errorf("collision error should name both claimants, got: %v", err)
+	}
+}
