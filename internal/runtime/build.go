@@ -149,21 +149,11 @@ func Build(ctx context.Context, cfg *config.Config, deps Deps, generation uint64
 		}
 		res, ferr := deps.Fetcher.Fetch(ctx, src)
 		if ferr != nil {
-			if deps.Metrics != nil {
-				deps.Metrics.SpecFetches.WithLabelValues(b.Name, "error").Inc()
-			}
 			return nil, ferr
 		}
-		outcome := "ok"
 		if res.Stale {
-			outcome = "stale"
 			degraded = append(degraded, b.Name)
 			log.Warn("using a cached spec; the upstream document was unreachable", "backend", b.Name)
-		} else if res.NotModified {
-			outcome = "not_modified"
-		}
-		if deps.Metrics != nil {
-			deps.Metrics.SpecFetches.WithLabelValues(b.Name, outcome).Inc()
 		}
 
 		spec, lerr := oas.Load(res.Data, oas.LoadOptions{
@@ -263,11 +253,19 @@ func Build(ctx context.Context, cfg *config.Config, deps Deps, generation uint64
 			continue
 		}
 		backend := backends[b.Name]
-		if deps.Metrics != nil {
-			for _, h := range backend.Pool().Hosts() {
-				deps.Metrics.HostHealthy.WithLabelValues(b.Name, h.URL.Host).Set(1)
+		recordHealthy := func() {
+			if deps.Metrics == nil {
+				return
 			}
+			n := 0
+			for _, h := range backend.Pool().Hosts() {
+				if h.Healthy() {
+					n++
+				}
+			}
+			deps.Metrics.HostsHealthy.WithLabelValues(b.Name).Set(float64(n))
 		}
+		recordHealthy()
 		backend.StartHealthChecks(rtCtx, proxy.HealthCheckConfig{
 			Path:           b.HealthCheck.Path,
 			Interval:       b.HealthCheck.Interval.Std(),
@@ -276,13 +274,7 @@ func Build(ctx context.Context, cfg *config.Config, deps Deps, generation uint64
 			HealthyAfter:   b.HealthCheck.HealthyAfter,
 		}, func(h *proxy.Host, healthy bool) {
 			log.Warn("upstream host health changed", "backend", b.Name, "host", h.URL.Host, "healthy", healthy)
-			if deps.Metrics != nil {
-				v := 0.0
-				if healthy {
-					v = 1
-				}
-				deps.Metrics.HostHealthy.WithLabelValues(b.Name, h.URL.Host).Set(v)
-			}
+			recordHealthy()
 		})
 	}
 
@@ -419,11 +411,6 @@ func breakerConfig(b, d *config.CircuitBreaker, name string, m *observ.Metrics) 
 		FailureRatio: c.FailureRatio,
 		MinRequests:  c.MinRequests,
 		OpenFor:      c.OpenFor.Std(),
-		OnChange: func(s proxy.State) {
-			if m != nil {
-				m.BreakerState.WithLabelValues(name).Set(float64(s))
-			}
-		},
 	}
 }
 
@@ -437,11 +424,8 @@ func (rt *Runtime) proxyHandler(br *BoundRoute, m *observ.Metrics) http.Handler 
 		}
 
 		resp, result, err := br.Backend.Do(r, upstreamPath)
-		if result != nil && m != nil {
-			m.UpstreamAttempts.WithLabelValues(br.Route.Backend.Name).Observe(float64(result.Attempts))
-			if result.Upstream > 0 {
-				m.UpstreamDuration.WithLabelValues(br.Route.Backend.Name).Observe(result.Upstream.Seconds())
-			}
+		if result != nil && m != nil && result.Upstream > 0 {
+			m.UpstreamDuration.WithLabelValues(br.Route.Backend.Name).Observe(result.Upstream.Seconds())
 		}
 		if info != nil && result != nil {
 			info.UpstreamAttempt = result.Attempts

@@ -85,8 +85,6 @@ type Deps struct {
 type Metrics interface {
 	CountAuth(middleware, result string)
 	CountRateLimit(middleware, decision string)
-	CountValidation(route, result string)
-	CountCache(route, result string)
 }
 
 // Constructor builds an Instance from its configuration block.

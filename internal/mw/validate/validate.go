@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime"
 	"net/http"
 	"strings"
@@ -129,7 +130,7 @@ type compiledRoute struct {
 	params []compiledParam
 	body   *compiledBody
 	route  string
-	metric chain.Metrics
+	log    *slog.Logger
 }
 
 type compiledBody struct {
@@ -154,7 +155,7 @@ func (i *instance) ForRoute(r *routetable.Route) (chain.Middleware, error) {
 		return nil, err
 	}
 
-	cr := &compiledRoute{set: i.set, route: r.OperationID, metric: i.deps.Metrics}
+	cr := &compiledRoute{set: i.set, route: r.OperationID, log: i.deps.Logger}
 	for _, p := range params {
 		cp := compiledParam{ParamSpec: p}
 		if p.SchemaPtr != "" {
@@ -207,22 +208,18 @@ func (cr *compiledRoute) serve(w http.ResponseWriter, r *http.Request, next http
 	}
 
 	if len(errs) == 0 {
-		if cr.metric != nil {
-			cr.metric.CountValidation(cr.route, "pass")
-		}
 		next.ServeHTTP(w, r)
 		return
 	}
 
 	if cr.set.Request == ModeWarn {
-		if cr.metric != nil {
-			cr.metric.CountValidation(cr.route, "warn")
+		// Warn mode enforces nothing, so this is the only trace.
+		if cr.log != nil {
+			cr.log.WarnContext(r.Context(), "request does not match the API contract",
+				"route", cr.route, "errors", len(errs), "enforced", false)
 		}
 		next.ServeHTTP(w, r)
 		return
-	}
-	if cr.metric != nil {
-		cr.metric.CountValidation(cr.route, "reject")
 	}
 	httperr.Write(w, r, httperr.Problem{
 		Status: http.StatusBadRequest,
