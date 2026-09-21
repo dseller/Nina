@@ -132,9 +132,6 @@ func (s *Server) pollOne(ctx context.Context, src specsrc.Source, every time.Dur
 			cancel()
 			if err != nil {
 				s.log.Warn("spec refresh failed", "backend", src.Backend, "error", err)
-				if s.metrics != nil {
-					s.metrics.SpecFetches.WithLabelValues(src.Backend, "error").Inc()
-				}
 				continue
 			}
 			if res.Hash == rt.SpecHash(src.Backend) {

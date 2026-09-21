@@ -2,33 +2,30 @@
 package observ
 
 import (
+	"strconv"
+
 	"github.com/prometheus/client_golang/prometheus"
 )
 
 // Metrics is the gateway's Prometheus instrumentation.
+//
+// The set is small on purpose. Per-request detail is on the access log line
+// and point-in-time state is on the admin /status endpoint; only what is
+// worth alerting on becomes a time series.
 //
 // Every label used here is bounded: routes are labelled by their gateway path
 // template and operation id, never by the concrete request path, so a client
 // cannot blow up cardinality by varying an id.
 type Metrics struct {
 	Requests         *prometheus.CounterVec
-	Duration         *prometheus.HistogramVec
-	InFlight         prometheus.Gauge
 	UpstreamDuration *prometheus.HistogramVec
 	UpstreamErrors   *prometheus.CounterVec
-	UpstreamAttempts *prometheus.HistogramVec
-	BreakerState     *prometheus.GaugeVec
-	HostHealthy      *prometheus.GaugeVec
+	HostsHealthy     *prometheus.GaugeVec
 
-	AuthTotal       *prometheus.CounterVec
-	RateLimitTotal  *prometheus.CounterVec
-	ValidationTotal *prometheus.CounterVec
-	CacheTotal      *prometheus.CounterVec
+	AuthTotal      *prometheus.CounterVec
+	RateLimitTotal *prometheus.CounterVec
 
-	Reloads     *prometheus.CounterVec
-	SpecFetches *prometheus.CounterVec
-	Routes      prometheus.Gauge
-	BuildInfo   *prometheus.GaugeVec
+	BuildInfo *prometheus.GaugeVec
 }
 
 // New registers the metric set with r.
@@ -36,19 +33,8 @@ func New(r prometheus.Registerer, version string) *Metrics {
 	m := &Metrics{
 		Requests: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "nina_requests_total",
-			Help: "Requests handled, by route and response status.",
+			Help: "Requests handled, by route and response status class.",
 		}, []string{"route", "method", "status"}),
-
-		Duration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "nina_request_duration_seconds",
-			Help:    "End-to-end gateway latency.",
-			Buckets: prometheus.DefBuckets,
-		}, []string{"route", "method"}),
-
-		InFlight: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "nina_requests_in_flight",
-			Help: "Requests currently being served.",
-		}),
 
 		UpstreamDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "nina_upstream_duration_seconds",
@@ -61,21 +47,10 @@ func New(r prometheus.Registerer, version string) *Metrics {
 			Help: "Upstream failures by kind.",
 		}, []string{"backend", "kind"}),
 
-		UpstreamAttempts: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "nina_upstream_attempts",
-			Help:    "Attempts made per request, including the first.",
-			Buckets: []float64{1, 2, 3, 4, 5},
+		HostsHealthy: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "nina_upstream_hosts_healthy",
+			Help: "Upstream hosts currently passing their health check, by backend.",
 		}, []string{"backend"}),
-
-		BreakerState: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "nina_circuit_breaker_state",
-			Help: "Circuit breaker state (0 closed, 1 open, 2 half-open).",
-		}, []string{"backend"}),
-
-		HostHealthy: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "nina_upstream_host_healthy",
-			Help: "1 when an upstream host is passing its health check.",
-		}, []string{"backend", "host"}),
 
 		AuthTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "nina_auth_total",
@@ -87,31 +62,6 @@ func New(r prometheus.Registerer, version string) *Metrics {
 			Help: "Rate limit decisions.",
 		}, []string{"middleware", "decision"}),
 
-		ValidationTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "nina_validation_total",
-			Help: "Request validation outcomes.",
-		}, []string{"route", "result"}),
-
-		CacheTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "nina_cache_total",
-			Help: "Response cache outcomes.",
-		}, []string{"route", "result"}),
-
-		Reloads: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "nina_reloads_total",
-			Help: "Configuration reloads by outcome.",
-		}, []string{"result"}),
-
-		SpecFetches: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "nina_spec_fetches_total",
-			Help: "Upstream spec fetches by backend and outcome.",
-		}, []string{"backend", "result"}),
-
-		Routes: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "nina_routes",
-			Help: "Routes currently served.",
-		}),
-
 		BuildInfo: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "nina_build_info",
 			Help: "Build information; always 1.",
@@ -119,13 +69,20 @@ func New(r prometheus.Registerer, version string) *Metrics {
 	}
 
 	r.MustRegister(
-		m.Requests, m.Duration, m.InFlight, m.UpstreamDuration, m.UpstreamErrors,
-		m.UpstreamAttempts, m.BreakerState, m.HostHealthy, m.AuthTotal,
-		m.RateLimitTotal, m.ValidationTotal, m.CacheTotal, m.Reloads,
-		m.SpecFetches, m.Routes, m.BuildInfo,
+		m.Requests, m.UpstreamDuration, m.UpstreamErrors, m.HostsHealthy,
+		m.AuthTotal, m.RateLimitTotal, m.BuildInfo,
 	)
 	m.BuildInfo.WithLabelValues(version).Set(1)
 	return m
+}
+
+// StatusClass buckets a response code to its class. The exact code is on the
+// access log line.
+func StatusClass(code int) string {
+	if code < 100 || code > 599 {
+		return "unknown"
+	}
+	return strconv.Itoa(code/100) + "xx"
 }
 
 // The following satisfy chain.Metrics, which keeps internal/mw free of a
@@ -137,12 +94,4 @@ func (m *Metrics) CountAuth(middleware, result string) {
 
 func (m *Metrics) CountRateLimit(middleware, decision string) {
 	m.RateLimitTotal.WithLabelValues(middleware, decision).Inc()
-}
-
-func (m *Metrics) CountValidation(route, result string) {
-	m.ValidationTotal.WithLabelValues(route, result).Inc()
-}
-
-func (m *Metrics) CountCache(route, result string) {
-	m.CacheTotal.WithLabelValues(route, result).Inc()
 }

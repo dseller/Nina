@@ -82,10 +82,6 @@ func NewServer(ctx context.Context, cfg *config.Config, deps Deps, opt ServerOpt
 	}
 	s.current.Store(rt)
 	s.ready.Store(true)
-	if s.metrics != nil {
-		s.metrics.Routes.Set(float64(len(rt.Table.Routes)))
-		s.metrics.Reloads.WithLabelValues("initial").Inc()
-	}
 	return s, nil
 }
 
@@ -131,10 +127,6 @@ func (s *Server) Reload(ctx context.Context, reason string) error {
 	// started before this point keeps the previous settings to completion.
 	s.settings.Store(&serverSettings{trustedProxies: trusted, maxBody: cfg.Server.MaxRequestBody})
 
-	if s.metrics != nil {
-		s.metrics.Reloads.WithLabelValues("success").Inc()
-		s.metrics.Routes.Set(float64(len(rt.Table.Routes)))
-	}
 	s.log.Info("configuration reloaded",
 		"reason", reason,
 		"generation", rt.Generation,
@@ -148,9 +140,6 @@ func (s *Server) Reload(ctx context.Context, reason string) error {
 }
 
 func (s *Server) recordFailure(stage string, err error, reason string) {
-	if s.metrics != nil {
-		s.metrics.Reloads.WithLabelValues("failure").Inc()
-	}
 	// Deliberately Error, not Fatal: the previous runtime keeps serving.
 	s.log.Error("reload failed; keeping the running configuration",
 		"stage", stage, "reason", reason, "error", err)
@@ -187,10 +176,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Request-Id", info.RequestID)
 
 	rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
-	if s.metrics != nil {
-		s.metrics.InFlight.Inc()
-		defer s.metrics.InFlight.Dec()
-	}
 	defer s.finish(rec, r, info)
 	defer s.recover(rec, r, info)
 
@@ -254,8 +239,7 @@ func (s *Server) finish(rec *statusRecorder, r *http.Request, info *reqctx.Info)
 		route = "unmatched"
 	}
 	if s.metrics != nil {
-		s.metrics.Requests.WithLabelValues(route, r.Method, strconv.Itoa(rec.status)).Inc()
-		s.metrics.Duration.WithLabelValues(route, r.Method).Observe(elapsed.Seconds())
+		s.metrics.Requests.WithLabelValues(route, r.Method, observ.StatusClass(rec.status)).Inc()
 	}
 
 	level := slog.LevelInfo

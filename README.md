@@ -194,8 +194,8 @@ Windows), or by an upstream spec whose content hash changed on a refresh poll.
 
 A new runtime is built completely — specs fetched, merged, schemas and routes
 compiled — before anything is swapped. If any step fails the running runtime is
-untouched, the error is logged with its stage, and `nina_reloads_total{result="failure"}`
-increments. **A typo in a config file must never take down a healthy gateway.**
+untouched and the error is logged with its stage and reason.
+**A typo in a config file must never take down a healthy gateway.**
 
 In-flight requests hold a reference to the runtime they started on and finish
 against it. The retired runtime closes once they drain, or after the grace period.
@@ -239,7 +239,7 @@ limiting, not cause a total outage. Operators who need the opposite can set
 Three, all deliberate:
 
 - **Circuit breaker is hand-written** rather than `sony/gobreaker`. The gateway
-  needs to publish breaker state as a metric and to control exactly when a
+  needs to publish breaker state on `/status` and to control exactly when a
   half-open probe is admitted; wrapping a library to get both back was more code
   than the ~150 lines it replaced.
 - **JWKS caching is hand-written** on top of `lestrrat-go/jwx` rather than using
