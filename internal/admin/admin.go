@@ -13,6 +13,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rivencove/nina/internal/runtime"
+	"github.com/rivencove/nina/internal/scanguard"
 )
 
 // Options configures the admin mux.
@@ -133,6 +134,45 @@ func Handler(o Options) http.Handler {
 		_ = enc.Encode(out)
 	})
 
+	// Bans in force, and lifting one. The admin listener is private, so this
+	// is as protected as the rest of it; keep it off public interfaces.
+	mux.HandleFunc("GET /scanguard/bans", func(w http.ResponseWriter, r *http.Request) {
+		g := scanGuard(w, o.Server)
+		if g == nil {
+			return
+		}
+		bans, err := g.Bans(r.Context())
+		if err != nil {
+			http.Error(w, "list bans: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(bans)
+	})
+	mux.HandleFunc("DELETE /scanguard/bans", func(w http.ResponseWriter, r *http.Request) {
+		g := scanGuard(w, o.Server)
+		if g == nil {
+			return
+		}
+		client := r.URL.Query().Get("client")
+		if client == "" {
+			http.Error(w, "the client query parameter is required", http.StatusBadRequest)
+			return
+		}
+		lifted, err := g.Unban(r.Context(), client)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if !lifted {
+			http.Error(w, "no ban in force for "+client, http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
 	if o.Docs {
 		spec := func(contentType string, pick func(*runtime.Runtime) []byte) http.HandlerFunc {
 			return func(w http.ResponseWriter, r *http.Request) {
@@ -165,7 +205,7 @@ func Handler(o Options) http.Handler {
 		}
 		var b strings.Builder
 		b.WriteString("nina admin\n\n")
-		for _, p := range []string{"/metrics", "/healthz", "/readyz", "/status", "/routes"} {
+		for _, p := range []string{"/metrics", "/healthz", "/readyz", "/status", "/routes", "/scanguard/bans"} {
 			b.WriteString(p + "\n")
 		}
 		if o.Docs {
@@ -176,6 +216,20 @@ func Handler(o Options) http.Handler {
 	})
 
 	return mux
+}
+
+// scanGuard returns the running guard, or writes the reason there is none.
+func scanGuard(w http.ResponseWriter, s *runtime.Server) *scanguard.Guard {
+	rt := s.Current()
+	if rt == nil {
+		http.Error(w, "not ready", http.StatusServiceUnavailable)
+		return nil
+	}
+	if rt.ScanGuard == nil {
+		http.Error(w, "the scan guard is not enabled (server.scan_guard)", http.StatusNotFound)
+		return nil
+	}
+	return rt.ScanGuard
 }
 
 // docsPage renders the merged document. The viewer is loaded from a CDN rather

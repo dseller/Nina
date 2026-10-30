@@ -173,6 +173,50 @@ describe it and the published document does not claim it. Nina synthesises an
 advertising the methods actually served at that path. These routes exist only in
 the router; they never reach the document.
 
+### Scan guard
+
+Every served route comes from the merged spec, so a request for an unknown path
+asks for something the published API says does not exist. A real client does
+that a handful of times; a scanner does it hundreds of times a minute.
+`server.scan_guard` counts those requests per client and bans offenders:
+
+```yaml
+server:
+  trusted_proxy_cidrs: ["10.0.0.0/8"]   # required behind a load balancer, see below
+  scan_guard:
+    max_misses: 20      # unknown-route requests within window earn a ban
+    window: 1m
+    ban: 15m            # first ban; each repeat doubles it...
+    max_ban: 24h        # ...up to this. Strikes are forgotten max_ban after a ban ends
+    allow_cidrs: []     # never counted or banned
+    ipv6_prefix: 64     # IPv6 clients are banned by network, not address
+    store: memory       # or redis, to share bans across replicas
+    # trap_paths: one request is a ban. Unset uses the built-in list
+    # (*/.env*, */.git/*, */.aws/*, */wp-*, *.php, */phpmyadmin*, */cgi-bin/*);
+    # [] turns traps off. `*` matches across `/`; matching ignores case.
+```
+
+- **Only a true 404 counts.** A 405 means the client found a real path, and a
+  served route is never counted, so a trap pattern cannot shadow one.
+- **A banned client gets `429` with `Retry-After`** on every request, served
+  routes included, before routing. The ban is logged once at `warn`; blocked
+  requests log at `debug` and show up as `route="blocked"` on
+  `nina_requests_total`, so a scanner does not fill the log.
+- **Bans survive reloads.** The memory store belongs to the process, not the
+  runtime. With `store: redis` they are shared by every replica and survive
+  restarts.
+- **A store failure lets traffic through.** A ban list is not worth an outage.
+
+**Set `trusted_proxy_cidrs` first.** Behind a proxy or load balancer without it,
+every client appears to come from the proxy, and the first scanner gets the
+proxy banned: a full outage. Nina warns at startup when the guard is on and no
+trusted proxies are configured. Shared addresses (offices, carrier NAT) are the
+other risk, so keep `max_misses` generous and allowlist known networks.
+
+The guard stops scanners that come from one address. One that rotates through
+many addresses stays under any per-address threshold; that needs protection at
+the edge.
+
 ## Operations
 
 The admin listener binds separately from the gateway so none of it has to be
@@ -185,6 +229,7 @@ public:
 | `/readyz` | Ready once a runtime has been built. Deliberately **not** tied to upstream health, so one sick backend cannot pull the gateway out of a load balancer |
 | `/status` | Generation, route count, hidden-route count, per-backend breaker state and host health |
 | `/routes` | What is served, what it maps to, and whether it is hidden from the document |
+| `/scanguard/bans` | `GET` lists the scan guard's bans in force; `DELETE ?client=<ip>` lifts one (for IPv6, any address in the banned network) |
 | `/openapi.json`, `/openapi.yaml`, `/docs` | The merged document and a viewer |
 
 ### Reload

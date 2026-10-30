@@ -23,6 +23,8 @@ type Info struct {
 	RequestID string
 	Start     time.Time
 	ClientIP  string
+	// Blocked is set when the scan guard refused the request.
+	Blocked bool
 
 	// Route identification, set by the dispatcher.
 	OperationID string

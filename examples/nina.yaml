@@ -11,6 +11,14 @@ server:
   listen: "127.0.0.1:18080"
   read_header_timeout: 5s
   idle_timeout: 60s
+  # Ban clients that probe for routes the gateway does not serve. Behind a
+  # load balancer, set trusted_proxy_cidrs first, or the balancer gets banned.
+  # See "Scan guard" in the README.
+  # scan_guard:
+  #   max_misses: 20
+  #   window: 1m
+  #   ban: 15m
+  #   max_ban: 24h
   admin:
     listen: "127.0.0.1:19090"
     docs: true

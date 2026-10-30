@@ -18,6 +18,7 @@ import (
 	"github.com/rivencove/nina/internal/httperr"
 	"github.com/rivencove/nina/internal/observ"
 	"github.com/rivencove/nina/internal/reqctx"
+	"github.com/rivencove/nina/internal/scanguard"
 )
 
 // Server owns the current Runtime and serves traffic against it.
@@ -60,6 +61,10 @@ type ServerOptions struct {
 
 // NewServer builds the first runtime and returns a ready server.
 func NewServer(ctx context.Context, cfg *config.Config, deps Deps, opt ServerOptions) (*Server, error) {
+	if deps.ScanGuardMemory == nil {
+		// Owned by the server rather than a runtime, so bans outlive reloads.
+		deps.ScanGuardMemory = scanguard.NewMemoryStore()
+	}
 	s := &Server{
 		deps:       deps,
 		log:        deps.Logger,
@@ -183,6 +188,20 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(rec, r.Body, set.maxBody)
 	}
 
+	guard := rt.ScanGuard
+	if guard != nil {
+		if left, banned := guard.Blocked(r.Context(), info.ClientIP); banned {
+			info.Blocked = true
+			rec.Header().Set("Retry-After", strconv.Itoa(int(left.Seconds()+0.999)))
+			httperr.Write(rec, r, httperr.Problem{
+				Status: http.StatusTooManyRequests,
+				Title:  "Temporarily blocked",
+				Detail: "too many requests for routes this gateway does not serve",
+			})
+			return
+		}
+	}
+
 	match := rt.Router.Match(r.Method, r.URL.EscapedPath())
 	if !match.Found {
 		if match.PathMatched {
@@ -193,6 +212,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				Detail: "this path accepts " + joinComma(match.Allow),
 			})
 			return
+		}
+		// Only a true 404 counts: a 405 means the client found a real path.
+		if guard != nil {
+			guard.Miss(r.Context(), info.ClientIP, r.URL.Path)
 		}
 		httperr.Write(rec, r, httperr.Problem{
 			Status: http.StatusNotFound,
@@ -235,7 +258,10 @@ func (s *Server) recover(rec *statusRecorder, r *http.Request, info *reqctx.Info
 func (s *Server) finish(rec *statusRecorder, r *http.Request, info *reqctx.Info) {
 	elapsed := time.Since(info.Start)
 	route := info.Template
-	if route == "" {
+	switch {
+	case info.Blocked:
+		route = "blocked"
+	case route == "":
 		route = "unmatched"
 	}
 	if s.metrics != nil {
@@ -245,6 +271,10 @@ func (s *Server) finish(rec *statusRecorder, r *http.Request, info *reqctx.Info)
 	level := slog.LevelInfo
 	if rec.status >= 500 {
 		level = slog.LevelError
+	} else if info.Blocked {
+		// A banned scanner would otherwise put a warning in the log for every
+		// probe. The ban itself was logged once; the rest is on the metric.
+		level = slog.LevelDebug
 	} else if rec.status >= 400 {
 		level = slog.LevelWarn
 	}
