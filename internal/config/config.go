@@ -40,6 +40,48 @@ type Server struct {
 	// TrustedProxyCIDRs lists networks whose X-Forwarded-For we believe when
 	// deriving the client IP. Empty means trust nothing and use the peer address.
 	TrustedProxyCIDRs []string `json:"trusted_proxy_cidrs"`
+	// ScanGuard temporarily blocks clients that probe for routes the gateway
+	// does not serve. Absent means off.
+	ScanGuard *ScanGuard `json:"scan_guard"`
+}
+
+// ScanGuard counts requests for unknown routes per client and bans a client
+// that makes too many of them, or that asks for a known scanner target at all.
+//
+// Only 404s count. A 405 means the client found a real path, and a matched
+// route is never counted however it is answered.
+type ScanGuard struct {
+	// MaxMisses unknown-route requests within Window earn a ban.
+	MaxMisses int      `json:"max_misses"`
+	Window    Duration `json:"window"`
+	// Ban is the first ban's length. Each repeat ban doubles it, up to MaxBan.
+	// Repeat offences are remembered until MaxBan after the last ban ends.
+	Ban    Duration `json:"ban"`
+	MaxBan Duration `json:"max_ban"`
+	// TrapPaths are glob patterns for paths no API client asks for. One miss
+	// on a trap path is a ban. `*` matches anything, including `/`, and
+	// matching ignores case. Unset means the built-in list; [] turns traps off.
+	// A trap never fires on a path the gateway serves.
+	TrapPaths []string `json:"trap_paths"`
+	// AllowCIDRs are never counted or banned.
+	AllowCIDRs []string `json:"allow_cidrs"`
+	// IPv6Prefix groups IPv6 clients by network, since one host can rotate
+	// through a whole /64 for free. Defaults to 64.
+	IPv6Prefix int `json:"ipv6_prefix"`
+	// Store is memory (default) or redis. Memory bans are per process and
+	// survive reloads; redis bans are shared by every replica.
+	Store string `json:"store"`
+}
+
+// DefaultTrapPaths are paths that only scanners ask an API gateway for.
+var DefaultTrapPaths = []string{
+	"*/.env*",
+	"*/.git/*",
+	"*/.aws/*",
+	"*/wp-*",
+	"*.php",
+	"*/phpmyadmin*",
+	"*/cgi-bin/*",
 }
 
 type Admin struct {

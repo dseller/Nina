@@ -342,3 +342,65 @@ func TestHideTagsValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestScanGuardOffByDefault(t *testing.T) {
+	c, err := Parse("test.yaml", []byte(minimal))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Server.ScanGuard != nil {
+		t.Error("scan guard is on without being configured")
+	}
+}
+
+func TestScanGuardDefaults(t *testing.T) {
+	c, err := Parse("test.yaml", []byte(minimal+"server:\n  scan_guard: {}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sg := c.Server.ScanGuard
+	if sg.MaxMisses != 20 || sg.Window.Std() != time.Minute || sg.Ban.Std() != 15*time.Minute ||
+		sg.MaxBan.Std() != 24*time.Hour || sg.IPv6Prefix != 64 || sg.Store != "memory" {
+		t.Errorf("defaults = %+v", sg)
+	}
+	if len(sg.TrapPaths) != len(DefaultTrapPaths) {
+		t.Errorf("trap paths = %v, want the built-in list", sg.TrapPaths)
+	}
+}
+
+func TestScanGuardEmptyTrapListTurnsTrapsOff(t *testing.T) {
+	c, err := Parse("test.yaml", []byte(minimal+"server:\n  scan_guard: { trap_paths: [] }\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Server.ScanGuard.TrapPaths) != 0 {
+		t.Errorf("trap paths = %v, want none", c.Server.ScanGuard.TrapPaths)
+	}
+}
+
+func TestScanGuardValidation(t *testing.T) {
+	doc := minimal + `
+server:
+  scan_guard:
+    max_misses: -1
+    ban: 1h
+    max_ban: 1m
+    trap_paths: ["wp-admin"]
+    allow_cidrs: ["10.0.0.0/33", "nope"]
+    ipv6_prefix: 200
+    store: redis
+`
+	_, err := Parse("test.yaml", []byte(doc))
+	if err == nil {
+		t.Fatal("expected validation errors")
+	}
+	for _, want := range []string{
+		"scan_guard.max_misses", "scan_guard.max_ban", "scan_guard.trap_paths[0]",
+		"scan_guard.allow_cidrs[0]", "scan_guard.allow_cidrs[1]", "scan_guard.ipv6_prefix",
+		"scan_guard.store: redis is not configured",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("missing %q in:\n%v", want, err)
+		}
+	}
+}

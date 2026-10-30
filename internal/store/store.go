@@ -66,6 +66,15 @@ func NewRegistry(ro *RedisOptions) (*Registry, error) {
 
 func (r *Registry) HasRedis() bool { return r != nil && r.redis != nil }
 
+// Redis returns the shared client, or nil when none is configured. It is owned
+// by the registry and closed with it.
+func (r *Registry) Redis() *redis.Client {
+	if r == nil {
+		return nil
+	}
+	return r.redis
+}
+
 // Ping checks Redis reachability. A failure is reported but is not fatal: the
 // gateway should still start, with limiters degraded, rather than refuse to
 // serve because a counter store is down.

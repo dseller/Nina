@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"regexp"
@@ -94,6 +95,29 @@ func (c *Config) applyDefaults() {
 			}
 		}
 	}
+	if sg := c.Server.ScanGuard; sg != nil {
+		if sg.MaxMisses == 0 {
+			sg.MaxMisses = 20
+		}
+		if sg.Window == 0 {
+			sg.Window = Duration(time.Minute)
+		}
+		if sg.Ban == 0 {
+			sg.Ban = Duration(15 * time.Minute)
+		}
+		if sg.MaxBan == 0 {
+			sg.MaxBan = Duration(24 * time.Hour)
+		}
+		if sg.TrapPaths == nil {
+			sg.TrapPaths = append([]string(nil), DefaultTrapPaths...)
+		}
+		if sg.IPv6Prefix == 0 {
+			sg.IPv6Prefix = 64
+		}
+		if sg.Store == "" {
+			sg.Store = "memory"
+		}
+	}
 	if c.Defaults.Retry != nil {
 		normaliseRetry(c.Defaults.Retry)
 	}
@@ -143,6 +167,10 @@ func (c *Config) Validate() error {
 	}
 	if c.Server.Listen == "" {
 		p.addf("server.listen", "must not be empty")
+	}
+
+	if sg := c.Server.ScanGuard; sg != nil {
+		validateScanGuard(&p, "server.scan_guard", sg, c.Stores.Redis != nil)
 	}
 
 	seenHidden := map[string]bool{}
@@ -299,6 +327,43 @@ func validateBreaker(p *problems, path string, cb *CircuitBreaker) {
 	}
 	if cb.OpenFor <= 0 {
 		p.addf(path+".open_for", "must be positive")
+	}
+}
+
+func validateScanGuard(p *problems, path string, sg *ScanGuard, haveRedis bool) {
+	if sg.MaxMisses < 1 {
+		p.addf(path+".max_misses", "must be at least 1, got %d", sg.MaxMisses)
+	}
+	if sg.Window < 0 {
+		p.addf(path+".window", "must be positive")
+	}
+	if sg.Ban < 0 {
+		p.addf(path+".ban", "must be positive")
+	}
+	if sg.MaxBan < sg.Ban {
+		p.addf(path+".max_ban", "%s is shorter than ban (%s)", sg.MaxBan.Std(), sg.Ban.Std())
+	}
+	for i, t := range sg.TrapPaths {
+		if !strings.HasPrefix(t, "/") && !strings.HasPrefix(t, "*") {
+			p.addf(fmt.Sprintf("%s.trap_paths[%d]", path, i), "must start with / or *, got %q", t)
+		}
+	}
+	for i, cidr := range sg.AllowCIDRs {
+		if _, _, err := net.ParseCIDR(cidr); err != nil && net.ParseIP(cidr) == nil {
+			p.addf(fmt.Sprintf("%s.allow_cidrs[%d]", path, i), "%q is not an IP address or CIDR", cidr)
+		}
+	}
+	if sg.IPv6Prefix < 1 || sg.IPv6Prefix > 128 {
+		p.addf(path+".ipv6_prefix", "must be between 1 and 128, got %d", sg.IPv6Prefix)
+	}
+	switch sg.Store {
+	case "memory":
+	case "redis":
+		if !haveRedis {
+			p.addf(path+".store", "redis is not configured (add stores.redis to the config)")
+		}
+	default:
+		p.addf(path+".store", "must be memory or redis, got %q", sg.Store)
 	}
 }
 

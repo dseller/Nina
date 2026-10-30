@@ -22,6 +22,7 @@ import (
 	"github.com/rivencove/nina/internal/reqctx"
 	"github.com/rivencove/nina/internal/router"
 	"github.com/rivencove/nina/internal/routetable"
+	"github.com/rivencove/nina/internal/scanguard"
 	"github.com/rivencove/nina/internal/specsrc"
 	"github.com/rivencove/nina/internal/store"
 	yaml "go.yaml.in/yaml/v4"
@@ -41,6 +42,8 @@ type Runtime struct {
 	Config     *config.Config
 	Table      *routetable.Table
 	Router     *router.Router[*BoundRoute]
+	// ScanGuard is nil when server.scan_guard is not configured.
+	ScanGuard *scanguard.Guard
 
 	backends  map[string]*proxy.Backend
 	instances map[string]chain.Instance
@@ -62,6 +65,9 @@ type Deps struct {
 	Fetcher *specsrc.Fetcher
 	// Registry supplies middleware constructors.
 	Registry *chain.Registry
+	// ScanGuardMemory holds memory-store bans. The server creates it once, so
+	// bans survive reloads; Build makes a throwaway one when it is nil.
+	ScanGuardMemory *scanguard.MemoryStore
 }
 
 // Build assembles a runtime. It performs every fallible step — fetching specs,
@@ -117,6 +123,27 @@ func Build(ctx context.Context, cfg *config.Config, deps Deps, generation uint64
 				"addr", cfg.Stores.Redis.Addr, "error", perr)
 		}
 		pcancel()
+	}
+
+	// 1b. The scan guard. Built over the long-lived memory store or this
+	// runtime's Redis client, so only its settings change on a reload.
+	var guard *scanguard.Guard
+	if sg := cfg.Server.ScanGuard; sg != nil {
+		var gs scanguard.Store = deps.ScanGuardMemory
+		switch {
+		case sg.Store == "redis":
+			gs = scanguard.NewRedisStore(stores.Redis())
+		case deps.ScanGuardMemory == nil:
+			gs = scanguard.NewMemoryStore()
+		}
+		guard, err = scanguard.New(sg, gs, log)
+		if err != nil {
+			return nil, fmt.Errorf("server.scan_guard: %w", err)
+		}
+		if len(cfg.Server.TrustedProxyCIDRs) == 0 {
+			log.Warn("scan guard is on but server.trusted_proxy_cidrs is empty; " +
+				"behind a proxy or load balancer every client shares its address, and one scanner gets it banned")
+		}
 	}
 
 	// 2. Middleware instances (shared across routes).
@@ -218,6 +245,7 @@ func Build(ctx context.Context, cfg *config.Config, deps Deps, generation uint64
 		backends:   backends,
 		instances:  instances,
 		stores:     stores,
+		ScanGuard:  guard,
 		specHashes: hashes,
 		cancel:     cancelRuntime,
 		log:        log,
