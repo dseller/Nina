@@ -217,6 +217,35 @@ The guard stops scanners that come from one address. One that rotates through
 many addresses stays under any per-address threshold; that needs protection at
 the edge.
 
+### Tenant logging
+
+For multi-tenant APIs served as `<tenant>.example.com`, `server.tenant` pulls
+the tenant out of the host and adds it to the access log as `tenant`:
+
+```yaml
+server:
+  tenant:
+    hosts:                      # first match wins; {tenant} is one whole label
+      - "{tenant}.example.com"
+      - "{tenant}.eu.example.com"
+    exclude: [www, api]         # match a pattern but are not tenants
+    trust_forwarded_host: false # read X-Forwarded-Host from trusted_proxy_cidrs
+```
+
+- **Every request gets it**, including 401s, 404s and scan-guard blocks. The
+  tenant is set before the scan guard and routing run.
+- **The log only ever holds a valid DNS label.** Matching ignores case and
+  port. `{tenant}` matches exactly one label, so `a.b.example.com` does not
+  match `{tenant}.example.com`. A host that matches no pattern logs
+  `tenant=""`. Since clients set the Host header themselves, this is useful
+  for logs, not as an identity.
+- **It is never a metric label.** Tenants are unbounded; to count per tenant,
+  aggregate the logs.
+- **`trust_forwarded_host`** is for proxies that rewrite Host. Nina only reads
+  the header when the peer is in `trusted_proxy_cidrs`, and uses the rightmost
+  value. Enable it only if that proxy overwrites the header rather than
+  passing a client's value through.
+
 ## Operations
 
 The admin listener binds separately from the gateway so none of it has to be

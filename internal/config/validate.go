@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/rivencove/nina/internal/tenant"
 )
 
 // Errors is a collection of validation problems. Reporting every problem at once
@@ -171,6 +173,9 @@ func (c *Config) Validate() error {
 
 	if sg := c.Server.ScanGuard; sg != nil {
 		validateScanGuard(&p, "server.scan_guard", sg, c.Stores.Redis != nil)
+	}
+	if t := c.Server.Tenant; t != nil {
+		validateTenant(&p, "server.tenant", t, len(c.Server.TrustedProxyCIDRs) > 0)
 	}
 
 	seenHidden := map[string]bool{}
@@ -364,6 +369,25 @@ func validateScanGuard(p *problems, path string, sg *ScanGuard, haveRedis bool) 
 		}
 	default:
 		p.addf(path+".store", "must be memory or redis, got %q", sg.Store)
+	}
+}
+
+func validateTenant(p *problems, path string, t *Tenant, haveProxies bool) {
+	if len(t.Hosts) == 0 {
+		p.addf(path+".hosts", "must list at least one pattern, such as \"{tenant}.example.com\"")
+	}
+	for i, h := range t.Hosts {
+		if err := tenant.CheckPattern(h); err != nil {
+			p.addf(fmt.Sprintf("%s.hosts[%d]", path, i), "%v", err)
+		}
+	}
+	for i, e := range t.Exclude {
+		if err := tenant.CheckLabel(e); err != nil {
+			p.addf(fmt.Sprintf("%s.exclude[%d]", path, i), "%v", err)
+		}
+	}
+	if t.TrustForwardedHost && !haveProxies {
+		p.addf(path+".trust_forwarded_host", "needs server.trusted_proxy_cidrs; without it no peer is trusted and the header is never read")
 	}
 }
 

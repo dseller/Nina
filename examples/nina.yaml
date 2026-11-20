@@ -19,6 +19,10 @@ server:
   #   window: 1m
   #   ban: 15m
   #   max_ban: 24h
+  # Log the tenant from <tenant>.example.com hosts. See "Tenant logging".
+  # tenant:
+  #   hosts: ["{tenant}.example.com"]
+  #   exclude: [www]
   admin:
     listen: "127.0.0.1:19090"
     docs: true

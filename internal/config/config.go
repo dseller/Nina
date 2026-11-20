@@ -43,6 +43,26 @@ type Server struct {
 	// ScanGuard temporarily blocks clients that probe for routes the gateway
 	// does not serve. Absent means off.
 	ScanGuard *ScanGuard `json:"scan_guard"`
+	// Tenant derives a tenant name from the request host for the access log.
+	// Absent means off.
+	Tenant *Tenant `json:"tenant"`
+}
+
+// Tenant extracts a tenant from the host a request was sent to, so
+// acme.example.com logs tenant "acme". It only labels log lines: it never
+// becomes a metric label, since tenants are unbounded.
+type Tenant struct {
+	// Hosts are host patterns with one whole label written as {tenant}, such
+	// as "{tenant}.example.com". The first match wins. Matching ignores case
+	// and any port. {tenant} matches exactly one label.
+	Hosts []string `json:"hosts"`
+	// Exclude lists labels that match a pattern but are not tenants, such as
+	// "www". Matching ignores case.
+	Exclude []string `json:"exclude"`
+	// TrustForwardedHost reads X-Forwarded-Host instead of Host when the peer
+	// is in trusted_proxy_cidrs. Off by default: only enable it when that
+	// proxy overwrites the header rather than passing a client's value along.
+	TrustForwardedHost bool `json:"trust_forwarded_host"`
 }
 
 // ScanGuard counts requests for unknown routes per client and bans a client

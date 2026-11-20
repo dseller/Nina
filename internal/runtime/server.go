@@ -19,6 +19,7 @@ import (
 	"github.com/rivencove/nina/internal/observ"
 	"github.com/rivencove/nina/internal/reqctx"
 	"github.com/rivencove/nina/internal/scanguard"
+	"github.com/rivencove/nina/internal/tenant"
 )
 
 // Server owns the current Runtime and serves traffic against it.
@@ -51,6 +52,24 @@ type Server struct {
 type serverSettings struct {
 	trustedProxies []*net.IPNet
 	maxBody        int64
+	tenant         *tenant.Matcher // nil when tenant extraction is off
+	forwardedHost  bool
+}
+
+func newSettings(cfg *config.Config) (*serverSettings, error) {
+	trusted, err := reqctx.ParseCIDRs(cfg.Server.TrustedProxyCIDRs)
+	if err != nil {
+		return nil, fmt.Errorf("server.trusted_proxy_cidrs: %w", err)
+	}
+	set := &serverSettings{trustedProxies: trusted, maxBody: cfg.Server.MaxRequestBody}
+	if t := cfg.Server.Tenant; t != nil {
+		set.tenant, err = tenant.Compile(t.Hosts, t.Exclude)
+		if err != nil {
+			return nil, fmt.Errorf("server.tenant: %w", err)
+		}
+		set.forwardedHost = t.TrustForwardedHost
+	}
+	return set, nil
 }
 
 // ServerOptions configures a Server.
@@ -75,11 +94,11 @@ func NewServer(ctx context.Context, cfg *config.Config, deps Deps, opt ServerOpt
 	if s.drainGrace == 0 {
 		s.drainGrace = 30 * time.Second
 	}
-	trusted, err := reqctx.ParseCIDRs(cfg.Server.TrustedProxyCIDRs)
+	set, err := newSettings(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("server.trusted_proxy_cidrs: %w", err)
+		return nil, err
 	}
-	s.settings.Store(&serverSettings{trustedProxies: trusted, maxBody: cfg.Server.MaxRequestBody})
+	s.settings.Store(set)
 
 	rt, err := Build(ctx, cfg, deps, s.generation.Add(1))
 	if err != nil {
@@ -120,7 +139,7 @@ func (s *Server) Reload(ctx context.Context, reason string) error {
 		return err
 	}
 
-	trusted, err := reqctx.ParseCIDRs(cfg.Server.TrustedProxyCIDRs)
+	set, err := newSettings(cfg)
 	if err != nil {
 		rt.Retire(0)
 		s.recordFailure("config", err, reason)
@@ -130,7 +149,7 @@ func (s *Server) Reload(ctx context.Context, reason string) error {
 	old := s.current.Swap(rt)
 	// Read on the hot path, written only here under reloadMu. A request that
 	// started before this point keeps the previous settings to completion.
-	s.settings.Store(&serverSettings{trustedProxies: trusted, maxBody: cfg.Server.MaxRequestBody})
+	s.settings.Store(set)
 
 	s.log.Info("configuration reloaded",
 		"reason", reason,
@@ -176,6 +195,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		RequestID: requestID(r),
 		Start:     time.Now(),
 		ClientIP:  reqctx.ClientIP(r, set.trustedProxies),
+	}
+	if set.tenant != nil {
+		// Before the scan guard and routing, so rejected requests carry it too.
+		info.Tenant = set.tenant.Match(reqctx.Host(r, set.trustedProxies, set.forwardedHost))
 	}
 	r = r.WithContext(reqctx.With(r.Context(), info))
 	w.Header().Set("X-Request-Id", info.RequestID)
@@ -292,6 +315,7 @@ func (s *Server) finish(rec *statusRecorder, r *http.Request, info *reqctx.Info)
 		"upstream_host", info.UpstreamHost,
 		"attempts", info.UpstreamAttempt,
 		"consumer", info.Consumer,
+		"tenant", info.Tenant,
 		"client_ip", info.ClientIP,
 	)
 }

@@ -38,6 +38,10 @@ type Info struct {
 	Scopes   []string
 	Claims   map[string]any
 
+	// Tenant is derived from the request host when server.tenant is set. It
+	// is for logs only and must never become a metric label.
+	Tenant string
+
 	// Upstream outcome, filled in by the proxy handler for the access log.
 	UpstreamStatus  int
 	UpstreamAttempt int
@@ -87,6 +91,35 @@ func ClientIP(r *http.Request, trusted []*net.IPNet) string {
 		}
 	}
 	return peer
+}
+
+// Host returns the host the client addressed. With forwarded set, a trusted
+// proxy's X-Forwarded-Host replaces it; the rightmost value is the one that
+// proxy wrote. Anything else would let a client pick its own host.
+func Host(r *http.Request, trusted []*net.IPNet, forwarded bool) string {
+	if !forwarded || len(trusted) == 0 {
+		return r.Host
+	}
+	xfh := r.Header.Values("X-Forwarded-Host")
+	if len(xfh) == 0 {
+		return r.Host
+	}
+	peer, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		peer = r.RemoteAddr
+	}
+	ip := net.ParseIP(peer)
+	if ip == nil || !inAny(ip, trusted) {
+		return r.Host
+	}
+	last := xfh[len(xfh)-1]
+	if i := strings.LastIndexByte(last, ','); i >= 0 {
+		last = last[i+1:]
+	}
+	if last = strings.TrimSpace(last); last != "" {
+		return last
+	}
+	return r.Host
 }
 
 func inAny(ip net.IP, nets []*net.IPNet) bool {
