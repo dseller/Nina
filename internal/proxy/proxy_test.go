@@ -277,3 +277,131 @@ func TestSingleSlashJoin(t *testing.T) {
 		}
 	}
 }
+
+// countingReader records how much of a request body has been consumed.
+type countingReader struct {
+	r io.Reader
+	n atomic.Int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n.Add(int64(n))
+	return n, err
+}
+
+// transportFunc lets a test stand in for the upstream at the RoundTrip level.
+type transportFunc func(*http.Request) (*http.Response, error)
+
+func (f transportFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func okResponse(r *http.Request) *http.Response {
+	return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Header: http.Header{}, Request: r}
+}
+
+// A request that can never be retried must reach the upstream as a stream, not
+// after being read into memory. Large uploads used to be buffered whole when
+// retries were configured, which ran the gateway out of memory.
+func TestNonRetryableBodyIsStreamed(t *testing.T) {
+	const size = 4 << 20
+	src := &countingReader{r: strings.NewReader(strings.Repeat("x", size))}
+
+	var readBeforeSend int64 = -1
+	var received int64
+	b := newTestBackend(t, Options{
+		Name: "t", Hosts: []string{"http://upstream"}, Timeout: 5 * time.Second,
+		Retry:        RetryPolicy{Attempts: 2, Backoff: time.Millisecond, IdempotentOnly: true},
+		MaxRetryBody: 8 << 20, // larger than the body: only retryability stops buffering
+		Transport: transportFunc(func(r *http.Request) (*http.Response, error) {
+			readBeforeSend = src.n.Load()
+			n, err := io.Copy(io.Discard, r.Body)
+			received = n
+			return okResponse(r), err
+		}),
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "http://gateway/upload", src)
+	req.RemoteAddr = "10.0.0.1:1"
+	resp, _, err := b.Do(req, "/upload")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if readBeforeSend != 0 {
+		t.Errorf("%d bytes of a non-retryable body were read before sending, want 0", readBeforeSend)
+	}
+	if received != size {
+		t.Errorf("upstream received %d bytes, want %d", received, size)
+	}
+}
+
+// A retryable body larger than MaxRetryBody is streamed, so memory per request
+// stays bounded by MaxRetryBody rather than the upload size.
+func TestOversizedRetryableBodyIsStreamed(t *testing.T) {
+	const size = 4 << 20
+	src := &countingReader{r: strings.NewReader(strings.Repeat("x", size))}
+
+	var readBeforeSend int64 = -1
+	var received int64
+	b := newTestBackend(t, Options{
+		Name: "t", Hosts: []string{"http://upstream"}, Timeout: 5 * time.Second,
+		Retry: RetryPolicy{Attempts: 2, Backoff: time.Millisecond, IdempotentOnly: true},
+		Transport: transportFunc(func(r *http.Request) (*http.Response, error) {
+			readBeforeSend = src.n.Load()
+			n, err := io.Copy(io.Discard, r.Body)
+			received = n
+			return okResponse(r), err
+		}),
+	})
+
+	req := httptest.NewRequest(http.MethodPut, "http://gateway/upload", src)
+	req.RemoteAddr = "10.0.0.1:1"
+	resp, _, err := b.Do(req, "/upload")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if readBeforeSend > 1<<20+1<<16 {
+		t.Errorf("%d bytes were buffered before sending, want at most about the 1 MiB default", readBeforeSend)
+	}
+	if received != size {
+		t.Errorf("upstream received %d bytes, want %d", received, size)
+	}
+}
+
+// Small idempotent bodies are still buffered and replayed intact on retry.
+func TestRetryReplaysSmallBody(t *testing.T) {
+	var calls atomic.Int64
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(data))
+		if calls.Add(1) == 1 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	b := newTestBackend(t, Options{
+		Name: "t", Hosts: []string{srv.URL}, Timeout: 5 * time.Second,
+		Retry: RetryPolicy{Attempts: 2, Backoff: time.Millisecond, IdempotentOnly: true},
+	})
+
+	req := httptest.NewRequest(http.MethodPut, "http://gateway/x", strings.NewReader(`{"a":1}`))
+	req.RemoteAddr = "10.0.0.1:1"
+	resp, res, err := b.Do(req, "/x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || res.Attempts != 2 {
+		t.Fatalf("status %d after %d attempts, want 200 after 2", resp.StatusCode, res.Attempts)
+	}
+	for i, got := range bodies {
+		if got != `{"a":1}` {
+			t.Errorf("attempt %d body = %q", i+1, got)
+		}
+	}
+}

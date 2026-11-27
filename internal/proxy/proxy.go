@@ -43,7 +43,9 @@ type Options struct {
 	Breaker        BreakerConfig
 	ForwardHeaders map[string]string
 	// MaxRetryBody bounds how much of a request body will be buffered so a retry
-	// can replay it. Larger bodies simply are not retried.
+	// can replay it. Larger bodies are streamed and simply are not retried.
+	// Defaults to 1 MiB; keep it small, since every in-flight retryable request
+	// may hold this much in memory.
 	MaxRetryBody int64
 	// InsecureSkipVerify disables upstream certificate verification. See
 	// config.TLSConfig for what that gives up.
@@ -213,14 +215,20 @@ func (b *Backend) Do(req *http.Request, upstreamPath string) (*http.Response, *R
 		}
 	}()
 
-	body, replayable, err := b.snapshotBody(req)
-	if err != nil {
-		return nil, nil, &Error{Kind: KindConnect, Backend: b.Name, Err: err}
-	}
-
-	attempts := 1 + b.retry.Attempts
-	if !b.retryable(req, replayable) {
-		attempts = 1
+	// Decide whether a retry is possible before touching the body: buffering a
+	// request that can never be replayed (a large POST upload, say) only costs
+	// memory and delays the first byte reaching the upstream.
+	attempts := 1
+	var body []byte
+	if b.retryable(req, true) {
+		buf, replayable, err := b.snapshotBody(req)
+		if err != nil {
+			return nil, nil, &Error{Kind: KindConnect, Backend: b.Name, Err: err}
+		}
+		if replayable {
+			body = buf
+			attempts = 1 + b.retry.Attempts
+		}
 	}
 
 	res := &Result{}

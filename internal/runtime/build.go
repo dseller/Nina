@@ -227,7 +227,6 @@ func Build(ctx context.Context, cfg *config.Config, deps Deps, generation uint64
 			Retry:              retryPolicy(b.Retry, cfg.Defaults.Retry),
 			Breaker:            breakerConfig(b.CircuitBreaker, cfg.Defaults.CircuitBreaker, b.Name, deps.Metrics),
 			ForwardHeaders:     b.ForwardHeaders,
-			MaxRetryBody:       cfg.Server.MaxRequestBody,
 			InsecureSkipVerify: b.InsecureTLS(),
 		})
 		if berr != nil {
