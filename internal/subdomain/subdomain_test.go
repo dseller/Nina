@@ -1,10 +1,10 @@
-package tenant
+package subdomain
 
 import "testing"
 
 func TestMatch(t *testing.T) {
 	m, err := Compile(
-		[]string{"{tenant}.example.com", "api.{tenant}.example.org"},
+		[]string{"{subdomain}.example.com", "api.{subdomain}.example.org"},
 		[]string{"www", "API"},
 	)
 	if err != nil {
@@ -45,20 +45,20 @@ func TestNilMatcher(t *testing.T) {
 }
 
 func TestCheckPattern(t *testing.T) {
-	good := []string{"{tenant}.example.com", "api.{tenant}.example.com", "{tenant}.localhost", "x.{tenant}"}
+	good := []string{"{subdomain}.example.com", "api.{subdomain}.example.com", "{subdomain}.localhost", "x.{subdomain}"}
 	for _, p := range good {
 		if err := CheckPattern(p); err != nil {
 			t.Errorf("CheckPattern(%q) = %v", p, err)
 		}
 	}
 	bad := []string{
-		"example.com",              // no placeholder
-		"{tenant}.{tenant}.com",    // two
-		"{tenant}",                 // matches everything
-		"t-{tenant}.example.com",   // partial label
-		"{tenant}.exa_mple.com",    // invalid fixed label
-		"{tenant}..com",            // empty label
-		"{tenant}.example.com:443", // port
+		"example.com",                 // no placeholder
+		"{subdomain}.{subdomain}.com", // two
+		"{subdomain}",                 // matches everything
+		"t-{subdomain}.example.com",   // partial label
+		"{subdomain}.exa_mple.com",    // invalid fixed label
+		"{subdomain}..com",            // empty label
+		"{subdomain}.example.com:443", // port
 	}
 	for _, p := range bad {
 		if err := CheckPattern(p); err == nil {

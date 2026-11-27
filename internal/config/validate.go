@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rivencove/nina/internal/tenant"
+	"github.com/rivencove/nina/internal/subdomain"
 )
 
 // Errors is a collection of validation problems. Reporting every problem at once
@@ -174,8 +174,8 @@ func (c *Config) Validate() error {
 	if sg := c.Server.ScanGuard; sg != nil {
 		validateScanGuard(&p, "server.scan_guard", sg, c.Stores.Redis != nil)
 	}
-	if t := c.Server.Tenant; t != nil {
-		validateTenant(&p, "server.tenant", t, len(c.Server.TrustedProxyCIDRs) > 0)
+	if t := c.Server.Subdomain; t != nil {
+		validateSubdomain(&p, "server.subdomain", t, len(c.Server.TrustedProxyCIDRs) > 0)
 	}
 
 	seenHidden := map[string]bool{}
@@ -372,17 +372,17 @@ func validateScanGuard(p *problems, path string, sg *ScanGuard, haveRedis bool) 
 	}
 }
 
-func validateTenant(p *problems, path string, t *Tenant, haveProxies bool) {
+func validateSubdomain(p *problems, path string, t *Subdomain, haveProxies bool) {
 	if len(t.Hosts) == 0 {
-		p.addf(path+".hosts", "must list at least one pattern, such as \"{tenant}.example.com\"")
+		p.addf(path+".hosts", "must list at least one pattern, such as \"{subdomain}.example.com\"")
 	}
 	for i, h := range t.Hosts {
-		if err := tenant.CheckPattern(h); err != nil {
+		if err := subdomain.CheckPattern(h); err != nil {
 			p.addf(fmt.Sprintf("%s.hosts[%d]", path, i), "%v", err)
 		}
 	}
 	for i, e := range t.Exclude {
-		if err := tenant.CheckLabel(e); err != nil {
+		if err := subdomain.CheckLabel(e); err != nil {
 			p.addf(fmt.Sprintf("%s.exclude[%d]", path, i), "%v", err)
 		}
 	}

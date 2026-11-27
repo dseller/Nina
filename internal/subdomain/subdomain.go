@@ -1,10 +1,10 @@
-// Package tenant derives a tenant name from the request's host.
+// Package subdomain extracts one label from a request's host.
 //
-// A pattern is a hostname with one label replaced by {tenant}, such as
-// "{tenant}.example.com" or "api.{tenant}.example.com". The placeholder matches
-// exactly one DNS label, so "a.b.example.com" is not tenant "a.b" of
-// "{tenant}.example.com".
-package tenant
+// A pattern is a hostname with one label replaced by {subdomain}, such as
+// "{subdomain}.example.com" or "api.{subdomain}.example.com". The placeholder matches
+// exactly one DNS label, so "a.b.example.com" is not subdomain "a.b" of
+// "{subdomain}.example.com".
+package subdomain
 
 import (
 	"fmt"
@@ -12,7 +12,7 @@ import (
 	"strings"
 )
 
-const placeholder = "{tenant}"
+const placeholder = "{subdomain}"
 
 // Matcher is immutable after Compile and safe for concurrent use.
 type Matcher struct {
@@ -25,7 +25,7 @@ type pattern struct {
 }
 
 // Compile checks and compiles host patterns. exclude lists labels that match a
-// pattern but are not tenants, such as "www".
+// pattern but should not be reported, such as "www".
 func Compile(patterns, exclude []string) (*Matcher, error) {
 	m := &Matcher{exclude: map[string]bool{}}
 	for _, raw := range patterns {
@@ -102,7 +102,7 @@ func labelByte(c byte) bool {
 	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-'
 }
 
-// Match returns the lower-case tenant for host, or "" when no pattern matches
+// Match returns the lower-case subdomain for host, or "" when no pattern matches
 // or the label is excluded. host may carry a port. The first matching pattern
 // wins.
 //

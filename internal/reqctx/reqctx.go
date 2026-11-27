@@ -38,9 +38,9 @@ type Info struct {
 	Scopes   []string
 	Claims   map[string]any
 
-	// Tenant is derived from the request host when server.tenant is set. It
+	// Subdomain is derived from the request host when server.subdomain is set. It
 	// is for logs only and must never become a metric label.
-	Tenant string
+	Subdomain string
 
 	// Upstream outcome, filled in by the proxy handler for the access log.
 	UpstreamStatus  int

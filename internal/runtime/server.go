@@ -19,7 +19,7 @@ import (
 	"github.com/rivencove/nina/internal/observ"
 	"github.com/rivencove/nina/internal/reqctx"
 	"github.com/rivencove/nina/internal/scanguard"
-	"github.com/rivencove/nina/internal/tenant"
+	"github.com/rivencove/nina/internal/subdomain"
 )
 
 // Server owns the current Runtime and serves traffic against it.
@@ -52,7 +52,7 @@ type Server struct {
 type serverSettings struct {
 	trustedProxies []*net.IPNet
 	maxBody        int64
-	tenant         *tenant.Matcher // nil when tenant extraction is off
+	subdomain      *subdomain.Matcher // nil when subdomain extraction is off
 	forwardedHost  bool
 }
 
@@ -62,10 +62,10 @@ func newSettings(cfg *config.Config) (*serverSettings, error) {
 		return nil, fmt.Errorf("server.trusted_proxy_cidrs: %w", err)
 	}
 	set := &serverSettings{trustedProxies: trusted, maxBody: cfg.Server.MaxRequestBody}
-	if t := cfg.Server.Tenant; t != nil {
-		set.tenant, err = tenant.Compile(t.Hosts, t.Exclude)
+	if t := cfg.Server.Subdomain; t != nil {
+		set.subdomain, err = subdomain.Compile(t.Hosts, t.Exclude)
 		if err != nil {
-			return nil, fmt.Errorf("server.tenant: %w", err)
+			return nil, fmt.Errorf("server.subdomain: %w", err)
 		}
 		set.forwardedHost = t.TrustForwardedHost
 	}
@@ -196,9 +196,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Start:     time.Now(),
 		ClientIP:  reqctx.ClientIP(r, set.trustedProxies),
 	}
-	if set.tenant != nil {
+	if set.subdomain != nil {
 		// Before the scan guard and routing, so rejected requests carry it too.
-		info.Tenant = set.tenant.Match(reqctx.Host(r, set.trustedProxies, set.forwardedHost))
+		info.Subdomain = set.subdomain.Match(reqctx.Host(r, set.trustedProxies, set.forwardedHost))
 	}
 	r = r.WithContext(reqctx.With(r.Context(), info))
 	w.Header().Set("X-Request-Id", info.RequestID)
@@ -315,7 +315,7 @@ func (s *Server) finish(rec *statusRecorder, r *http.Request, info *reqctx.Info)
 		"upstream_host", info.UpstreamHost,
 		"attempts", info.UpstreamAttempt,
 		"consumer", info.Consumer,
-		"tenant", info.Tenant,
+		"subdomain", info.Subdomain,
 		"client_ip", info.ClientIP,
 	)
 }

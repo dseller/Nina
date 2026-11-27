@@ -61,13 +61,13 @@ func (s *syncBuffer) requestLine(t *testing.T, n int) map[string]any {
 	}
 }
 
-func TestTenantIsLogged(t *testing.T) {
+func TestSubdomainIsLogged(t *testing.T) {
 	users := newUpstream(t, usersSpec)
 	orders := newUpstream(t, ordersSpec)
 	cfgYAML := strings.Replace(twoBackendConfig(users, orders), "  listen: \":0\"\n", `  listen: ":0"
   trusted_proxy_cidrs: ["127.0.0.1", "::1"]
-  tenant:
-    hosts: ["{tenant}.example.com"]
+  subdomain:
+    hosts: ["{subdomain}.example.com"]
     exclude: [www]
     trust_forwarded_host: true
 `, 1)
@@ -117,7 +117,7 @@ func TestTenantIsLogged(t *testing.T) {
 		name, host, forwarded, path, want string
 	}{
 		{"matched route", "acme.example.com", "", "/api/orders", "acme"},
-		{"unmatched route still logs the tenant", "acme.example.com:8080", "", "/nope", "acme"},
+		{"unmatched route still logs the subdomain", "acme.example.com:8080", "", "/nope", "acme"},
 		{"excluded label", "www.example.com", "", "/api/orders", ""},
 		{"foreign host", "acme.other.com", "", "/api/orders", ""},
 		{"trusted proxy's forwarded host wins", "lb.internal", "globex.example.com", "/api/orders", "globex"},
@@ -125,12 +125,12 @@ func TestTenantIsLogged(t *testing.T) {
 	}
 	for _, c := range cases {
 		line := send(c.host, c.forwarded, c.path)
-		if got, _ := line["tenant"].(string); got != c.want {
-			t.Errorf("%s: tenant = %q, want %q", c.name, got, c.want)
+		if got, _ := line["subdomain"].(string); got != c.want {
+			t.Errorf("%s: subdomain = %q, want %q", c.name, got, c.want)
 		}
 	}
 
-	// Tenants are unbounded, so they must never reach a metric label.
+	// Subdomains are unbounded, so they must never reach a metric label.
 	families, err := reg.Gather()
 	if err != nil {
 		t.Fatal(err)
@@ -138,22 +138,22 @@ func TestTenantIsLogged(t *testing.T) {
 	for _, f := range families {
 		for _, m := range f.GetMetric() {
 			for _, l := range m.GetLabel() {
-				if l.GetName() == "tenant" || l.GetValue() == "acme" || l.GetValue() == "globex" {
-					t.Errorf("metric %s carries tenant label %s=%s", f.GetName(), l.GetName(), l.GetValue())
+				if l.GetName() == "subdomain" || l.GetValue() == "acme" || l.GetValue() == "globex" {
+					t.Errorf("metric %s carries subdomain label %s=%s", f.GetName(), l.GetName(), l.GetValue())
 				}
 			}
 		}
 	}
 }
 
-func TestTenantIgnoresForwardedHostFromUntrustedPeer(t *testing.T) {
+func TestSubdomainIgnoresForwardedHostFromUntrustedPeer(t *testing.T) {
 	users := newUpstream(t, usersSpec)
 	orders := newUpstream(t, ordersSpec)
 	// The test client is loopback, which is deliberately not trusted here.
 	cfgYAML := strings.Replace(twoBackendConfig(users, orders), "  listen: \":0\"\n", `  listen: ":0"
   trusted_proxy_cidrs: ["10.0.0.0/8"]
-  tenant:
-    hosts: ["{tenant}.example.com"]
+  subdomain:
+    hosts: ["{subdomain}.example.com"]
     trust_forwarded_host: true
 `, 1)
 	dir := t.TempDir()
@@ -187,7 +187,7 @@ func TestTenantIgnoresForwardedHostFromUntrustedPeer(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if got := logs.requestLine(t, 1)["tenant"]; got != "acme" {
-		t.Errorf("tenant = %v, want acme from Host: an untrusted peer's X-Forwarded-Host was believed", got)
+	if got := logs.requestLine(t, 1)["subdomain"]; got != "acme" {
+		t.Errorf("subdomain = %v, want acme from Host: an untrusted peer's X-Forwarded-Host was believed", got)
 	}
 }
